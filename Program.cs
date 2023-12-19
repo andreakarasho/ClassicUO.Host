@@ -35,7 +35,9 @@ server2.OnClientDisconnected += id =>
 };
 server2.OnClientMessage += msg =>
 {
-    Console.WriteLine("[SERVER] client msg received << cmd: {0}, id: {1}, size: {2} bytes", msg.Command, msg.ID, msg.Payload.Length);
+#if DEBUG
+    Console.WriteLine("[SERVER] client msg received << cmd: {0}, id: {1}, size: {2} bytes", msg.Command, msg.ID, msg.Payload.Count);
+#endif
 };
 server2.Start(address, port);
 
@@ -47,20 +49,16 @@ server2.Start(address, port);
 //client2.Connect(address, port);
 
 
+Thread.Sleep(1000);
+
 
 while (true)
 {
-    var key = Console.ReadKey();
+    //
+    //var respFromClient = server2.Request(clientId, new ArraySegment<byte>(Array.Empty<byte>()));
+    //var respoFromServer = client2.Request(new ArraySegment<byte>(Array.Empty<byte>())); 
 
-    if (key.Key == ConsoleKey.A)
-    {
-        var pos = GetPlayerPosition(clientId);
-        if (pos != 123)
-        {
-
-        }
-        //server2.Request(new ArraySegment<byte>(Array.Empty<byte>()));
-    }
+    Thread.Sleep(1);
 }
 
 
@@ -68,7 +66,7 @@ while (true)
 int GetPlayerPosition(Guid guid)
 {
     var msg = server2.Request(guid, new ArraySegment<byte>(Array.Empty<byte>()));
-    if (msg.Payload.Length > 0)
+    if (msg.Payload.Count > 0)
     {
         // parse payload
         return 123;

@@ -12,7 +12,7 @@ sealed class Rpc : IDisposable
 {
     private readonly BinaryReader _reader;
     private readonly BinaryWriter _writer;
-
+    private readonly ConcurrentDictionary<Guid, RpcMessage> _messages = new ConcurrentDictionary<Guid, RpcMessage>();
 
     public Rpc(Stream reader, Stream writer)
     {
@@ -22,6 +22,7 @@ sealed class Rpc : IDisposable
 
     public void Dispose()
     {
+        _messages.Clear();
         _reader?.Dispose();
         _writer?.Dispose();
     }
@@ -29,7 +30,9 @@ sealed class Rpc : IDisposable
     public RpcMessage Request(ArraySegment<byte> payload)
     {
         var reqId = SendMessage(payload);
-        var response = ReceiveMessage();
+        //var response = WaitForMessageAsync(reqId, TimeSpan.FromSeconds(10)).ConfigureAwait(false).GetAwaiter().GetResult(); // ReceiveMessage();
+        var response = WaitForMessage(reqId, TimeSpan.FromSeconds(10));
+        //var response = ReceiveMessage();
 
         Trace.Assert(reqId.Equals(response.ID));
         Trace.Assert(response.Command == RpcCommand.Response);
@@ -37,16 +40,33 @@ sealed class Rpc : IDisposable
         return response;
     }
 
-    public void ResponseTo(RpcMessage request)
+    RpcMessage WaitForMessage(Guid id, TimeSpan timeout)
+    {
+        RpcMessage msg = default;
+        //var dt = DateTime.UtcNow;
+        while (_reader.BaseStream.CanRead && !_messages.TryRemove(id, out msg))
+        {
+        }
+
+        return msg;
+    }
+
+    async Task<RpcMessage> WaitForMessageAsync(Guid id, TimeSpan timeout)
+    {
+        await Task.Yield();
+        return WaitForMessage(id, timeout);
+    }
+
+    internal void ResponseTo(RpcMessage request)
     {
         _writer.Write((byte)RpcCommand.Response);
         _writer.Write(request.ID.ToByteArray());
-        _writer.Write((ushort)request.Payload.Length);
-        _writer.Write(request.Payload, 0, request.Payload.Length);
+        _writer.Write((ushort)request.Payload.Count);
+        _writer.Write(request.Payload.Array, request.Payload.Offset, request.Payload.Count);
         _writer.Flush();
     }
 
-    public Guid SendMessage(ArraySegment<byte> payload)
+    private Guid SendMessage(ArraySegment<byte> payload)
     {
         var id = Guid.NewGuid();
         _writer.Write((byte)RpcCommand.Request);
@@ -57,7 +77,7 @@ sealed class Rpc : IDisposable
         return id;
     }
 
-    public RpcMessage ReceiveMessage()
+    internal RpcMessage ReceiveMessage()
     {
         var cmd = (RpcCommand)_reader.ReadByte();
         if (cmd == RpcCommand.Invalid)
@@ -78,15 +98,26 @@ sealed class Rpc : IDisposable
             _reader.ReadByte()
         );
         var payloadSize = _reader.ReadUInt16();
-        var payload = new byte[payloadSize];
-        var read = _reader.Read(payload, 0, payloadSize);
+#if NETFRAMEWORK
+        var payload = new ArraySegment<byte>(payloadSize == 0 ? Array.Empty<byte>() : new byte[payloadSize], 0, payloadSize);
+#else
+        var payload = payloadSize == 0 ? ArraySegment<byte>.Empty : new ArraySegment<byte>(new byte[payloadSize], 0, payloadSize);
+#endif
+        var read = payloadSize == 0 ? 0 : _reader.Read(payload.Array, payload.Offset, payload.Count);
 
         if (read != payloadSize)
         {
 
         }
 
-        return new RpcMessage(cmd, id, payload);
+        var msg = new RpcMessage(cmd, id, payload);
+
+        if (!_messages.TryAdd(id, msg))
+        {
+
+        }
+
+        return msg;
     }
 }
 
@@ -123,16 +154,6 @@ sealed class TcpServerRpc
         _accepting = false;
     }
 
-    public RpcMessage Broadcast(ArraySegment<byte> payload)
-    {
-        foreach (var c in _clients)
-        {
-            var id = c.Value.Rpc.SendMessage(payload);
-        }
-
-        return default;
-    }
-
     public RpcMessage Request(Guid clientId, ArraySegment<byte> payload)
     {
         if (_clients.TryGetValue(clientId, out var client))
@@ -155,6 +176,7 @@ sealed class TcpServerRpc
 
         foreach (var l in _clients)
         {
+            l.Value.Rpc.Dispose();
             l.Value.Client.Close();
             l.Value.Client.Dispose();
         }
@@ -237,26 +259,22 @@ sealed class TcpClientRpc
 
         _tcp.Connect(address, port);
 
-        var stream = _tcp.GetStream();
-        _rpc = new Rpc(stream, stream);
+        var connected = _tcp.Connected;
 
-        Task.Run(ProcessServerRequest);
+        if (connected)
+        {
+            var stream = _tcp.GetStream();
+            _rpc = new Rpc(stream, stream);
 
-        return _tcp.Connected;
+            Task.Run(ProcessServerRequest);
+        }
+      
+        return connected;
     }
 
     public RpcMessage Request(ArraySegment<byte> payload)
     {
-        var id = _rpc.SendMessage(payload);
-
-
-
-        //var msg = _rpc.ReceiveMessage();
-
-        //Trace.Assert(id.Equals(msg.ID));
-        //Trace.Assert(msg.Command == RpcCommand.Response);
-
-        return default;
+        return _rpc.Request(payload);
     }
 
 
@@ -289,9 +307,9 @@ readonly struct RpcMessage
 {
     public readonly RpcCommand Command;
     public readonly Guid ID;
-    public readonly byte[] Payload;
+    public readonly ArraySegment<byte> Payload;
 
-    public RpcMessage(RpcCommand cmd, Guid id, byte[] payload)
+    public RpcMessage(RpcCommand cmd, Guid id, ArraySegment<byte> payload)
         => (Command, ID, Payload) = (cmd, id, payload);
 }
 
