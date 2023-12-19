@@ -26,12 +26,12 @@ var server2 = new TcpServerRpc();
 var clientId = Guid.Empty;
 server2.OnClientConnected += id =>
 {
-    Console.WriteLine("Client connected {0}", id);
+    Console.WriteLine("[SERVER] Client connected {0}", id);
     clientId = id;
 };
 server2.OnClientDisconnected += id =>
 {
-    Console.WriteLine("Client disconnected {0}", id);
+    Console.WriteLine("[SERVER] Client disconnected {0}", id);
 };
 server2.OnClientMessage += msg =>
 {
@@ -41,19 +41,36 @@ server2.OnClientMessage += msg =>
 };
 server2.Start(address, port);
 
-//var client2 = new TcpClientRpc();
-//client2.OnServerMessage += msg =>
-//{
-//    Console.WriteLine("[CLIENT] server msg received << cmd: {0}, id: {1}", msg.Command, msg.ID);
-//};
-//client2.Connect(address, port);
+
+for (int i = 0; i < 10; ++i)
+{
+    var client2 = new TcpClientRpc();
+    client2.OnServerMessage += msg =>
+    {
+        Console.WriteLine("[CLIENT] server msg received << cmd: {0}, id: {1}", msg.Command, msg.ID);
+    };
+    if (!client2.Connect(address, port))
+    {
+
+    }
+}
 
 
 Thread.Sleep(1000);
 
+var buf = new byte[4097];
+buf[0] = 123;
+//var resp = server2.Request(clientId, new ArraySegment<byte>(buf));
 
 while (true)
 {
+
+    var key = Console.ReadKey();
+    if (key.Key == ConsoleKey.A)
+    {
+        server2.Stop();
+        //client2.Disconnect();
+    }
     //
     //var respFromClient = server2.Request(clientId, new ArraySegment<byte>(Array.Empty<byte>()));
     //var respoFromServer = client2.Request(new ArraySegment<byte>(Array.Empty<byte>())); 
@@ -73,89 +90,3 @@ int GetPlayerPosition(Guid guid)
     }
     return 0;
 }
-
-//Console.WriteLine();
-// const int ReadWriteTimeout = 60000;
-
-//var server = new TcpListener(IPAddress.Parse(address), port);
-//server.Start();
-//server.Server.ReceiveTimeout = ReadWriteTimeout;
-//server.Server.SendTimeout = ReadWriteTimeout;
-
-//#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-//Task.Run(() => {
-//    var clientRpcs = new List<Rpc>();
-//    //using var serverWriter = new MemoryStream(4096);
-//    //using var serverReader = new MemoryStream(4096);
-//    //var rpcHost = new Rpc(serverReader, serverWriter);
-
-//    var request = new byte[32];
-//    request[0] = 1;
-
-//    while (true)
-//    {
-//        var client = server.AcceptTcpClient();
-
-//        var clientRpc = new Rpc(client.GetStream(), client.GetStream());
-//        clientRpcs.Add(clientRpc);
-
-//        //clientRpc.OnMessage += (rpc, msg) =>
-//        //{
-
-//        //};
-
-//        //client.Close();
-//        //client.Dispose();
-//        //continue;
-
-
-//        while (true)
-//        {
-//            var requestGuid = clientRpc.SendMessage(new ArraySegment<byte>(request));
-//            var requestGuid2 = clientRpc.SendMessage(new ArraySegment<byte>(request));
-//            var requestGuid3 = clientRpc.SendMessage(new ArraySegment<byte>(request));
-//            var response = clientRpc.ReceiveMessage();
-//            var response2 = clientRpc.ReceiveMessage();
-//            var response3 = clientRpc.ReceiveMessage();
-
-//            Trace.Assert(requestGuid.Equals(response.ID));
-//            Trace.Assert(requestGuid2.Equals(response2.ID));
-//            Trace.Assert(requestGuid3.Equals(response3.ID));
-//        }
-
-//    }
-//});
-//#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-
-
-
-//var tcp = new TcpClient() { NoDelay = true, SendTimeout = ReadWriteTimeout, ReceiveTimeout = ReadWriteTimeout };
-//tcp.Connect(address, port);
-//#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-//Task.Run(() =>
-//{
-//    var clientRpc = new Rpc(tcp.GetStream(), tcp.GetStream());
-
-//    //var id = clientRpc.SendMessage(new ArraySegment<byte>(Array.Empty<byte>()));
-
-//    while (tcp.Connected)
-//    {
-//        var available = tcp.Available;
-//        if (available <= 0)
-//        {
-//            Thread.Sleep(1);
-//            continue;
-//        }
-
-//        var msg = clientRpc.ReceiveMessage();
-//        Console.WriteLine("received: {0}", available);
-//        //Thread.Sleep(500);
-//        msg.Payload[0]++;
-//        clientRpc.ResponseTo(msg);
-
-//    }
-
-//    Console.WriteLine("client disconnected");
-//});
-//#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-
