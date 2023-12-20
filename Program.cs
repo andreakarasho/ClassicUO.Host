@@ -42,17 +42,15 @@ server2.OnClientMessage += msg =>
 };
 server2.Start(address, port);
 
-Console.ReadLine();
+//Console.ReadLine();
 
 var client2 = new TcpClientRpc();
 client2.OnServerMessage += msg =>
 {
     Console.WriteLine("[CLIENT] server msg received << cmd: {0}, id: {1}", msg.Command, msg.ID);
 };
-if (!client2.Connect(address, port))
-{
+client2.Connect(address, port);
 
-}
 Thread.Sleep(1000);
 
 var buf = new byte[6000];
@@ -65,8 +63,9 @@ while (true)
     var key = Console.ReadKey();
     if (key.Key == ConsoleKey.A)
     {
-        resp = client2.Request(new ArraySegment<byte>(buf));
-        //client2.Disconnect();
+        //server2.Stop();
+        //resp = client2.Request(new ArraySegment<byte>(buf));
+        client2.Disconnect();
     }
     //
     //var respFromClient = server2.Request(clientId, new ArraySegment<byte>(Array.Empty<byte>()));

@@ -138,7 +138,6 @@ static class RpcConst
 
 sealed class TcpServerRpc
 {
-    private bool _accepting;
     private TcpListener _server;
     private readonly ConcurrentDictionary<Guid, ClientSession> _clients = new ConcurrentDictionary<Guid, ClientSession>();
 
@@ -153,17 +152,12 @@ sealed class TcpServerRpc
         _server.Server.ReceiveTimeout = RpcConst.READ_WRITE_TIMEOUT;
         _server.Server.SendTimeout = RpcConst.READ_WRITE_TIMEOUT;
 
-        _accepting = true;
         _server.Start();
-
-        //Task.Run(AcceptClients);
-
         _server.BeginAcceptTcpClient(OnAccept, null);
     }
 
     public void Stop()
     {
-        _accepting = false;
         _server.Stop();
     }
 
@@ -179,43 +173,22 @@ sealed class TcpServerRpc
 
     void OnAccept(IAsyncResult ar)
     {
-        var client = _server.EndAcceptTcpClient(ar);
-        ProcessClient(client);
-
-        _server.BeginAcceptTcpClient(OnAccept, null);
-    }
-
-    void AcceptClients()
-    {
-        var threads = new List<Thread>();
         try
         {
-            while (_accepting)
-            {
-                var client = _server.AcceptTcpClient();
-                ProcessClient(client);
+            var client = _server.EndAcceptTcpClient(ar);
+            ProcessClient(client);
 
-                //var thread = new Thread(() => ProcessClient(client));
-                //thread.IsBackground = true;
-                //thread.Start();
+            _server.BeginAcceptTcpClient(OnAccept, null);
 
-                //threads.Add(thread);
-
-                //Task.Run(() => ProcessClient(client)).ConfigureAwait(false);
-            }
+            return;
         }
         catch (SocketException ex)
         {
             Console.WriteLine("[SERVER] socket exception:\n{0}", ex);
         }
+        catch (ObjectDisposedException)
+        { }
 
-        foreach (var thread in threads)
-        {
-            if (thread.IsAlive)
-            {
-                thread.Abort();
-            }
-        }
 
         foreach (var l in _clients)
         {
@@ -227,57 +200,28 @@ sealed class TcpServerRpc
         _server.Server.Dispose();
         _clients.Clear();
     }
-
     void ProcessClient(TcpClient client)
     {
-        //var stream = client.GetStream();
-        //var rpc = new Rpc(stream, stream);
-
         var session = new ClientSession(Guid.NewGuid(), client);
+
+        session.OnDisconnected += () =>
+        {
+            _clients.TryRemove(session.Guid, out var _);
+            OnClientDisconnected?.Invoke(session.Guid);
+        };
+        session.OnMessage += OnClientMessage;
         session.Start();
 
         _clients.TryAdd(session.Guid, session);
 
         OnClientConnected?.Invoke(session.Guid);
-
-        
-
-        //while (client.Connected)
-        //{
-        //    var msg = rpc.ReceiveMessage();
-        //    OnClientMessage?.Invoke(msg);
-
-        //    switch (msg.Command)
-        //    {
-        //        case RpcCommand.Request:
-        //            // Client is asking for some data, return the data to the client
-        //            rpc.ResponseTo(msg);
-        //            break;
-
-        //        case RpcCommand.Response:
-        //            // Client is responding from a request we did
-        //            break;
-
-        //        case RpcCommand.Invalid:
-        //            client.Close();
-        //            break;
-        //    }
-        //}
-
-        //rpc.Dispose();
-        //client.Close();
-        //client.Dispose();
-
-        //_clients.TryRemove(session.Guid, out var _);
-
-        //OnClientDisconnected?.Invoke(session.Guid);
     }
 }
 
 sealed class ClientSession
 {
-    private readonly AsyncCallback _onRecv, _onSend;
-    private MemoryStream _incoming, _sending;
+    private readonly AsyncCallback _onRecv;
+    private MemoryStream _incoming;
     private readonly ByteQueue _queue = new ByteQueue();
 
     public ClientSession(Guid guid, TcpClient client)
@@ -286,9 +230,10 @@ sealed class ClientSession
         Client = client;
 
         _onRecv = OnReceive;
-        _onSend = OnSend;
-
     }
+
+    public event Action<RpcMessage> OnMessage;
+    public event Action OnDisconnected;
 
     public Guid Guid { get; }
     public TcpClient Client { get; }
@@ -301,7 +246,6 @@ sealed class ClientSession
         _queue.Clear();
 
         _incoming = new MemoryStream(4096);
-        _sending = new MemoryStream(4096);
         Rpc = new Rpc(_incoming, stream);
 
         var buf = new byte[4096];
@@ -311,10 +255,21 @@ sealed class ClientSession
 
     void OnReceive(IAsyncResult ar)
     {
+        if (!Client.Connected)
+            return;
+
         var stream = Client.GetStream();
         var read = stream.EndRead(ar);
         if (read <= 0)
         {
+            Rpc.Dispose();
+            _incoming.Dispose();
+            _queue.Clear();
+            Client.Close();
+            Client.Dispose();
+
+            OnDisconnected?.Invoke();
+
             return;
         }
 
@@ -360,6 +315,8 @@ sealed class ClientSession
 
                 var msg = Rpc.ReceiveMessage();
 
+                OnMessage?.Invoke(msg);
+
                 switch (cmd)
                 {
                     case RpcCommand.Request:
@@ -376,110 +333,54 @@ sealed class ClientSession
             }
         }
     }
-
-    private void Flush()
-    {
-        var len = (int)_sending.Length;
-        if (len <= 0)
-            return;
-
-        _sending.Seek(0, SeekOrigin.Begin);
-        var buf = _sending.ToArray();
-
-        var stream = Client.GetStream();
-        stream.BeginWrite(buf, 0, len, _onSend, buf);
-    }
-
-    void OnSend(IAsyncResult ar)
-    {
-        var stream = Client.GetStream();
-        stream.EndWrite(ar);
-    }
 }
 
 sealed class TcpClientRpc
 {
-    private TcpClient _tcp;
+    private ClientSession _session;
 
-    public Action<RpcMessage> OnServerMessage;
-    public Action OnConnected, OnDisconnected;
+    public event Action<RpcMessage> OnServerMessage;
+    public event Action OnConnected, OnDisconnected;
 
-    public bool Connect(string address, int port)
+    public bool IsConnected => _session?.Client?.Connected ?? false;
+
+    public void Connect(string address, int port)
     {
-        _tcp = new TcpClient()
+        if (IsConnected)
+        {
+            throw new Exception("Client is already connected");
+        }
+
+        var tcp = new TcpClient()
         {
             NoDelay = true,
             SendTimeout = RpcConst.READ_WRITE_TIMEOUT,
             ReceiveTimeout = RpcConst.READ_WRITE_TIMEOUT
         };
 
-        _tcp.Connect(address, port);
-        _session = new ClientSession(Guid.Empty, _tcp);
-        _session.Start();
-        //var connected = _tcp.Connected;
-
-        //if (connected)
-        //{
-        //    var stream = _tcp.GetStream();
-        //    _rpc = new Rpc(stream, stream);
-        //    Task.Run(ProcessServerRequest);
-        //}
-
-        //_tcp.BeginConnect(address, port, OnConnection, null);
-
-        return true;
+        tcp.BeginConnect(address, port, OnConnection, tcp);
     }
-
-    private ClientSession _session;
 
     void OnConnection(IAsyncResult ar)
     {
-        _tcp.EndConnect(ar);
+        var tcp = (TcpClient)ar.AsyncState;
+        tcp.EndConnect(ar);
         OnConnected?.Invoke();
 
-        _session = new ClientSession(Guid.Empty, _tcp);
+        _session = new ClientSession(Guid.Empty, tcp);
+        _session.OnDisconnected += OnDisconnected;
+        _session.OnMessage += OnServerMessage;
         _session.Start();
     }
 
-
     public void Disconnect()
     {
-        _tcp?.Client?.Disconnect(false);
+        _session?.Client?.Client?.Disconnect(false);
     }
 
     public RpcMessage Request(ArraySegment<byte> payload)
     {
         return _session.Rpc.Request(payload);
-    }
-
-
-    void ProcessServerRequest()
-    {
-        //while (_tcp.Connected)
-        //{
-        //    var msg = _rpc.ReceiveMessage();
-        //    OnServerMessage?.Invoke(msg);
-
-        //    switch (msg.Command)
-        //    {
-        //        case RpcCommand.Request:
-        //            // Server is asking for some data, return the data to the server
-        //            _rpc.ResponseTo(msg);
-        //            break;
-
-        //        case RpcCommand.Response:
-        //            // Server is responding from a request we did
-        //            break;
-
-        //        case RpcCommand.Invalid:
-        //            _tcp.Close();
-        //            break;
-        //    }
-        //}
-
-        //_rpc.Dispose();
-        //_tcp.Close();
-        //_tcp.Dispose();
     }
 }
 
