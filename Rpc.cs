@@ -136,14 +136,16 @@ static class RpcConst
     public const int READ_WRITE_TIMEOUT = 0;
 }
 
-sealed class TcpServerRpc
+abstract class TcpServerRpc
 {
     private TcpListener _server;
     private readonly ConcurrentDictionary<Guid, ClientSession> _clients = new ConcurrentDictionary<Guid, ClientSession>();
 
-    public event Action<RpcMessage> OnClientMessage;
-    public event Action<Guid> OnClientConnected;
-    public event Action<Guid> OnClientDisconnected;
+    //public event Action<RpcMessage> OnClientMessage;
+    //public event Action<Guid> OnClientConnected;
+    //public event Action<Guid> OnClientDisconnected;
+
+    public ConcurrentDictionary<Guid, ClientSession> Clients => _clients;
 
     public void Start(string address, int port)
     {
@@ -170,6 +172,10 @@ sealed class TcpServerRpc
 
         return default;
     }
+
+    protected abstract void OnMessage(RpcMessage msg);
+    protected abstract void OnClientConnected(Guid id);
+    protected abstract void OnClientDisconnected(Guid id);
 
     void OnAccept(IAsyncResult ar)
     {
@@ -207,19 +213,20 @@ sealed class TcpServerRpc
         session.OnDisconnected += () =>
         {
             _clients.TryRemove(session.Guid, out var _);
-            OnClientDisconnected?.Invoke(session.Guid);
+            OnClientDisconnected(session.Guid);
         };
-        session.OnMessage += OnClientMessage;
+        session.OnMessage += OnMessage;
         session.Start();
 
         _clients.TryAdd(session.Guid, session);
 
-        OnClientConnected?.Invoke(session.Guid);
+        OnClientConnected(session.Guid);
     }
 }
 
 sealed class ClientSession : IDisposable
 {
+    private bool _disposed;
     private readonly AsyncCallback _onRecv;
     private MemoryStream _incoming;
     private readonly ByteQueue _queue = new ByteQueue();
@@ -241,11 +248,17 @@ sealed class ClientSession : IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+            return;
+
+        _disposed = true;
         Rpc.Dispose();
         _incoming.Dispose();
         _queue.Clear();
         Client.Close();
         Client.Dispose();
+
+        OnDisconnected?.Invoke();
     }
 
     public void Start()
@@ -266,14 +279,17 @@ sealed class ClientSession : IDisposable
         try
         {
             if (!Client.Connected)
+            {
+                Dispose();
+                
                 return;
+            }
 
             var stream = Client.GetStream();
             var read = stream.EndRead(ar);
             if (read <= 0)
             {
                 Dispose();
-                OnDisconnected?.Invoke();
 
                 return;
             }
@@ -290,6 +306,8 @@ sealed class ClientSession : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine("Client session exception: {0}", ex);
+
+            Dispose();
         }
     }
 
@@ -317,12 +335,16 @@ sealed class ClientSession : IDisposable
 
                 var buf = ArrayPool<byte>.Shared.Rent(packetLen);
                 packetLen = buffer.Dequeue(buf, 0, packetLen);
+
+                // TODO: remove the memorystream and use the underlying SendQueue buffer
                 _incoming.Write(buf, 0, packetLen);
 
                 ArrayPool<byte>.Shared.Return(buf);
 
                 _incoming.Seek(0, SeekOrigin.Begin);
 
+                // TODO: read the msg structure just once. We already read the cmd + payloadSize
+                //       maybe worth an header change: [cmd][payloadsize][guid][payload] ?
                 var msg = Rpc.ReceiveMessage();
 
                 OnMessage?.Invoke(msg);
@@ -345,12 +367,9 @@ sealed class ClientSession : IDisposable
     }
 }
 
-sealed class TcpClientRpc
+abstract class TcpClientRpc
 {
     private ClientSession _session;
-
-    public event Action<RpcMessage> OnServerMessage;
-    public event Action OnConnected, OnDisconnected;
 
     public bool IsConnected => _session?.Client?.Connected ?? false;
 
@@ -375,23 +394,29 @@ sealed class TcpClientRpc
     {
         var tcp = (TcpClient)ar.AsyncState;
         tcp.EndConnect(ar);
-        OnConnected?.Invoke();
+        OnConnected();
 
         _session = new ClientSession(Guid.Empty, tcp);
         _session.OnDisconnected += OnDisconnected;
-        _session.OnMessage += OnServerMessage;
+        _session.OnMessage += OnMessage;
         _session.Start();
     }
 
     public void Disconnect()
     {
         _session?.Client?.Client?.Disconnect(false);
+        //_session?.Dispose();
+        //OnDisconnected();
     }
 
     public RpcMessage Request(ArraySegment<byte> payload)
     {
         return _session.Rpc.Request(payload);
     }
+
+    protected abstract void OnMessage(RpcMessage msg);
+    protected abstract void OnConnected();
+    protected abstract void OnDisconnected();
 }
 
 readonly struct RpcMessage
