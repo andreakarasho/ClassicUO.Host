@@ -1,11 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.Net;
-using System.Net.Sockets;
 using System.Threading;
-using System.Threading.Tasks;
-using VoltRpc.Communication;
 
 var address = "127.0.0.1";
 var port = 7777;
@@ -72,17 +67,4 @@ while (true)
     //var respoFromServer = client2.Request(new ArraySegment<byte>(Array.Empty<byte>())); 
 
     Thread.Sleep(1);
-}
-
-
-// Assistant is asking for some data from CUO
-int GetPlayerPosition(Guid guid)
-{
-    var msg = server2.Request(guid, new ArraySegment<byte>(Array.Empty<byte>()));
-    if (msg.Payload.Count > 0)
-    {
-        // parse payload
-        return 123;
-    }
-    return 0;
 }
