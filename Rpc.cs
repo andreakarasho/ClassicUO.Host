@@ -218,7 +218,7 @@ sealed class TcpServerRpc
     }
 }
 
-sealed class ClientSession
+sealed class ClientSession : IDisposable
 {
     private readonly AsyncCallback _onRecv;
     private MemoryStream _incoming;
@@ -239,6 +239,14 @@ sealed class ClientSession
     public TcpClient Client { get; }
     public Rpc Rpc { get; private set; }
 
+    public void Dispose()
+    {
+        Rpc.Dispose();
+        _incoming.Dispose();
+        _queue.Clear();
+        Client.Close();
+        Client.Dispose();
+    }
 
     public void Start()
     {
@@ -255,32 +263,34 @@ sealed class ClientSession
 
     void OnReceive(IAsyncResult ar)
     {
-        if (!Client.Connected)
-            return;
-
-        var stream = Client.GetStream();
-        var read = stream.EndRead(ar);
-        if (read <= 0)
+        try
         {
-            Rpc.Dispose();
-            _incoming.Dispose();
-            _queue.Clear();
-            Client.Close();
-            Client.Dispose();
+            if (!Client.Connected)
+                return;
 
-            OnDisconnected?.Invoke();
+            var stream = Client.GetStream();
+            var read = stream.EndRead(ar);
+            if (read <= 0)
+            {
+                Dispose();
+                OnDisconnected?.Invoke();
 
-            return;
+                return;
+            }
+
+            var buf = (byte[])ar.AsyncState;
+
+            lock (_queue)
+                _queue.Enqueue(buf, 0, read);
+
+            ProcessIncomingMessages();
+
+            stream.BeginRead(buf, 0, buf.Length, _onRecv, buf);
         }
-
-        var buf = (byte[])ar.AsyncState;
-
-        lock (_queue)
-            _queue.Enqueue(buf, 0, read);
-
-        ProcessIncomingMessages();
-
-        stream.BeginRead(buf, 0, buf.Length, _onRecv, buf);
+        catch (Exception ex)
+        {
+            Console.WriteLine("Client session exception: {0}", ex);
+        }
     }
 
     void ProcessIncomingMessages()

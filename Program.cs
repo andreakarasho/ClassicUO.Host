@@ -42,7 +42,7 @@ server2.OnClientMessage += msg =>
 };
 server2.Start(address, port);
 
-//Console.ReadLine();
+Console.ReadLine();
 
 var client2 = new TcpClientRpc();
 client2.OnServerMessage += msg =>
