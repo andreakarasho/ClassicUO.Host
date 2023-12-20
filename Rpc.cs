@@ -141,9 +141,9 @@ sealed class TcpServerRpc
     private TcpListener _server;
     private readonly ConcurrentDictionary<Guid, ClientSession> _clients = new ConcurrentDictionary<Guid, ClientSession>();
 
-    public Action<RpcMessage> OnClientMessage;
-    public Action<Guid> OnClientConnected;
-    public Action<Guid> OnClientDisconnected;
+    public event Action<RpcMessage> OnClientMessage;
+    public event Action<Guid> OnClientConnected;
+    public event Action<Guid> OnClientDisconnected;
 
     public void Start(string address, int port)
     {
