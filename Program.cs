@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using VoltRpc.Communication;
 
 var address = "127.0.0.1";
 var port = 7777;
@@ -41,26 +42,22 @@ server2.OnClientMessage += msg =>
 };
 server2.Start(address, port);
 
+Console.ReadLine();
 
-for (int i = 0; i < 10; ++i)
+var client2 = new TcpClientRpc();
+client2.OnServerMessage += msg =>
 {
-    var client2 = new TcpClientRpc();
-    client2.OnServerMessage += msg =>
-    {
-        Console.WriteLine("[CLIENT] server msg received << cmd: {0}, id: {1}", msg.Command, msg.ID);
-    };
-    if (!client2.Connect(address, port))
-    {
+    Console.WriteLine("[CLIENT] server msg received << cmd: {0}, id: {1}", msg.Command, msg.ID);
+};
+if (!client2.Connect(address, port))
+{
 
-    }
 }
-
-
 Thread.Sleep(1000);
 
-var buf = new byte[4097];
+var buf = new byte[6000];
 buf[0] = 123;
-//var resp = server2.Request(clientId, new ArraySegment<byte>(buf));
+var resp = server2.Request( clientId,new ArraySegment<byte>(buf));
 
 while (true)
 {
@@ -68,7 +65,7 @@ while (true)
     var key = Console.ReadKey();
     if (key.Key == ConsoleKey.A)
     {
-        server2.Stop();
+        resp = client2.Request(new ArraySegment<byte>(buf));
         //client2.Disconnect();
     }
     //

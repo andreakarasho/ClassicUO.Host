@@ -1,4 +1,6 @@
 using System;
+using System.Buffers;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -19,6 +21,7 @@ sealed class Rpc : IDisposable
         _reader = new BinaryReader(reader);
         _writer = new BinaryWriter(writer);
     }
+
 
     public void Dispose()
     {
@@ -99,6 +102,12 @@ sealed class Rpc : IDisposable
             _reader.ReadByte()
         );
         var payloadSize = _reader.ReadUInt16();
+
+        if (_reader.BaseStream.CanSeek && _reader.BaseStream.Position - 19 + payloadSize > _reader.BaseStream.Length)
+        {
+            return RpcMessage.Invalid;
+        }
+
 #if NETFRAMEWORK
         var payload = new ArraySegment<byte>(payloadSize == 0 ? Array.Empty<byte>() : new byte[payloadSize], 0, payloadSize);
 #else
@@ -147,7 +156,9 @@ sealed class TcpServerRpc
         _accepting = true;
         _server.Start();
 
-        Task.Run(AcceptClients);
+        //Task.Run(AcceptClients);
+
+        _server.BeginAcceptTcpClient(OnAccept, null);
     }
 
     public void Stop()
@@ -166,6 +177,14 @@ sealed class TcpServerRpc
         return default;
     }
 
+    void OnAccept(IAsyncResult ar)
+    {
+        var client = _server.EndAcceptTcpClient(ar);
+        ProcessClient(client);
+
+        _server.BeginAcceptTcpClient(OnAccept, null);
+    }
+
     void AcceptClients()
     {
         var threads = new List<Thread>();
@@ -174,12 +193,13 @@ sealed class TcpServerRpc
             while (_accepting)
             {
                 var client = _server.AcceptTcpClient();
+                ProcessClient(client);
 
-                var thread = new Thread(() => ProcessClient(client));
-                thread.IsBackground = true;
-                thread.Start();
+                //var thread = new Thread(() => ProcessClient(client));
+                //thread.IsBackground = true;
+                //thread.Start();
 
-                threads.Add(thread);
+                //threads.Add(thread);
 
                 //Task.Run(() => ProcessClient(client)).ConfigureAwait(false);
             }
@@ -210,67 +230,179 @@ sealed class TcpServerRpc
 
     void ProcessClient(TcpClient client)
     {
-        var stream = client.GetStream();
-        var rpc = new Rpc(stream, stream);
+        //var stream = client.GetStream();
+        //var rpc = new Rpc(stream, stream);
 
-        var session = new ClientSession(Guid.NewGuid(), client, rpc);
+        var session = new ClientSession(Guid.NewGuid(), client);
+        session.Start();
+
         _clients.TryAdd(session.Guid, session);
 
         OnClientConnected?.Invoke(session.Guid);
 
-        while (client.Connected)
-        {
-            var msg = rpc.ReceiveMessage();
-            OnClientMessage?.Invoke(msg);
+        
 
-            switch (msg.Command)
-            {
-                case RpcCommand.Request:
-                    // Client is asking for some data, return the data to the client
-                    rpc.ResponseTo(msg);
-                    break;
+        //while (client.Connected)
+        //{
+        //    var msg = rpc.ReceiveMessage();
+        //    OnClientMessage?.Invoke(msg);
 
-                case RpcCommand.Response:
-                    // Client is responding from a request we did
-                    break;
+        //    switch (msg.Command)
+        //    {
+        //        case RpcCommand.Request:
+        //            // Client is asking for some data, return the data to the client
+        //            rpc.ResponseTo(msg);
+        //            break;
 
-                case RpcCommand.Invalid:
-                    client.Close();
-                    break;
-            }
-        }
+        //        case RpcCommand.Response:
+        //            // Client is responding from a request we did
+        //            break;
 
-        rpc.Dispose();
-        client.Close();
-        client.Dispose();
+        //        case RpcCommand.Invalid:
+        //            client.Close();
+        //            break;
+        //    }
+        //}
 
-        _clients.TryRemove(session.Guid, out var _);
+        //rpc.Dispose();
+        //client.Close();
+        //client.Dispose();
 
-        OnClientDisconnected?.Invoke(session.Guid);
+        //_clients.TryRemove(session.Guid, out var _);
+
+        //OnClientDisconnected?.Invoke(session.Guid);
+    }
+}
+
+sealed class ClientSession
+{
+    private readonly AsyncCallback _onRecv, _onSend;
+    private MemoryStream _incoming, _sending;
+    private readonly ByteQueue _queue = new ByteQueue();
+
+    public ClientSession(Guid guid, TcpClient client)
+    {
+        Guid = guid;
+        Client = client;
+
+        _onRecv = OnReceive;
+        _onSend = OnSend;
+
+    }
+
+    public Guid Guid { get; }
+    public TcpClient Client { get; }
+    public Rpc Rpc { get; private set; }
+
+
+    public void Start()
+    {
+        var stream = Client.GetStream();
+        _queue.Clear();
+
+        _incoming = new MemoryStream(4096);
+        _sending = new MemoryStream(4096);
+        Rpc = new Rpc(_incoming, stream);
+
+        var buf = new byte[4096];
+        stream.BeginRead(buf, 0, buf.Length, _onRecv, buf);
     }
 
 
-    sealed class ClientSession
+    void OnReceive(IAsyncResult ar)
     {
-        public ClientSession(Guid guid, TcpClient client, Rpc rpc)
+        var stream = Client.GetStream();
+        var read = stream.EndRead(ar);
+        if (read <= 0)
         {
-            Guid = guid;
-            Client = client;
-            Rpc = rpc;
+            return;
         }
 
-        public Guid Guid { get; }
-        public TcpClient Client { get; }
-        public Rpc Rpc { get; }
+        var buf = (byte[])ar.AsyncState;
+
+        lock (_queue)
+            _queue.Enqueue(buf, 0, read);
+
+        ProcessIncomingMessages();
+
+        stream.BeginRead(buf, 0, buf.Length, _onRecv, buf);
+    }
+
+    void ProcessIncomingMessages()
+    {
+        const int RPC_HEADER_SIZE = 19;
+
+        var buffer = _queue;
+
+        if (buffer == null || buffer.Length <= 0)
+            return;
+
+        lock (buffer)
+        {
+            var len = buffer.Length;
+            while (len > 0)
+            {
+                var cmd = (RpcCommand) buffer.GetPacketID();
+                if (cmd == RpcCommand.Invalid)
+                    return;
+
+                var packetLen = buffer.GetPacketLength() + RPC_HEADER_SIZE;
+                if (len < packetLen)
+                    return;
+
+                var buf = ArrayPool<byte>.Shared.Rent(packetLen);
+                packetLen = buffer.Dequeue(buf, 0, packetLen);
+                _incoming.Write(buf, 0, packetLen);
+
+                ArrayPool<byte>.Shared.Return(buf);
+
+                _incoming.Seek(0, SeekOrigin.Begin);
+
+                var msg = Rpc.ReceiveMessage();
+
+                switch (cmd)
+                {
+                    case RpcCommand.Request:
+                        Rpc.ResponseTo(msg);
+                        break;
+
+                    case RpcCommand.Response:
+                        break;
+                }
+
+                _incoming.Seek(0, SeekOrigin.Begin);
+
+                len = buffer.Length;
+            }
+        }
+    }
+
+    private void Flush()
+    {
+        var len = (int)_sending.Length;
+        if (len <= 0)
+            return;
+
+        _sending.Seek(0, SeekOrigin.Begin);
+        var buf = _sending.ToArray();
+
+        var stream = Client.GetStream();
+        stream.BeginWrite(buf, 0, len, _onSend, buf);
+    }
+
+    void OnSend(IAsyncResult ar)
+    {
+        var stream = Client.GetStream();
+        stream.EndWrite(ar);
     }
 }
 
 sealed class TcpClientRpc
 {
     private TcpClient _tcp;
-    private Rpc _rpc;
 
     public Action<RpcMessage> OnServerMessage;
+    public Action OnConnected, OnDisconnected;
 
     public bool Connect(string address, int port)
     {
@@ -282,18 +414,33 @@ sealed class TcpClientRpc
         };
 
         _tcp.Connect(address, port);
+        _session = new ClientSession(Guid.Empty, _tcp);
+        _session.Start();
+        //var connected = _tcp.Connected;
 
-        var connected = _tcp.Connected;
+        //if (connected)
+        //{
+        //    var stream = _tcp.GetStream();
+        //    _rpc = new Rpc(stream, stream);
+        //    Task.Run(ProcessServerRequest);
+        //}
 
-        if (connected)
-        {
-            var stream = _tcp.GetStream();
-            _rpc = new Rpc(stream, stream);
-            Task.Run(ProcessServerRequest);
-        }
-      
-        return connected;
+        //_tcp.BeginConnect(address, port, OnConnection, null);
+
+        return true;
     }
+
+    private ClientSession _session;
+
+    void OnConnection(IAsyncResult ar)
+    {
+        _tcp.EndConnect(ar);
+        OnConnected?.Invoke();
+
+        _session = new ClientSession(Guid.Empty, _tcp);
+        _session.Start();
+    }
+
 
     public void Disconnect()
     {
@@ -302,37 +449,37 @@ sealed class TcpClientRpc
 
     public RpcMessage Request(ArraySegment<byte> payload)
     {
-        return _rpc.Request(payload);
+        return _session.Rpc.Request(payload);
     }
 
 
     void ProcessServerRequest()
     {
-        while (_tcp.Connected)
-        {
-            var msg = _rpc.ReceiveMessage();
-            OnServerMessage?.Invoke(msg);
+        //while (_tcp.Connected)
+        //{
+        //    var msg = _rpc.ReceiveMessage();
+        //    OnServerMessage?.Invoke(msg);
 
-            switch (msg.Command)
-            {
-                case RpcCommand.Request:
-                    // Server is asking for some data, return the data to the server
-                    _rpc.ResponseTo(msg);
-                    break;
+        //    switch (msg.Command)
+        //    {
+        //        case RpcCommand.Request:
+        //            // Server is asking for some data, return the data to the server
+        //            _rpc.ResponseTo(msg);
+        //            break;
 
-                case RpcCommand.Response:
-                    // Server is responding from a request we did
-                    break;
+        //        case RpcCommand.Response:
+        //            // Server is responding from a request we did
+        //            break;
 
-                case RpcCommand.Invalid:
-                    _tcp.Close();
-                    break;
-            }
-        }
+        //        case RpcCommand.Invalid:
+        //            _tcp.Close();
+        //            break;
+        //    }
+        //}
 
-        _rpc.Dispose();
-        _tcp.Close();
-        _tcp.Dispose();
+        //_rpc.Dispose();
+        //_tcp.Close();
+        //_tcp.Dispose();
     }
 }
 
@@ -353,4 +500,146 @@ enum RpcCommand
     Invalid = -1,
     Request,
     Response
+}
+
+sealed class ByteQueue
+{
+    private int m_Head;
+    private int m_Tail;
+    private int m_Size;
+
+    private byte[] m_Buffer;
+
+    public int Length { get { return m_Size; } }
+
+    public ByteQueue()
+    {
+        m_Buffer = new byte[2048];
+    }
+
+    public void Clear()
+    {
+        m_Head = 0;
+        m_Tail = 0;
+        m_Size = 0;
+    }
+
+    private void SetCapacity(int capacity)
+    {
+        var newBuffer = new byte[capacity];
+
+        if (m_Size > 0)
+        {
+            if (m_Head < m_Tail)
+            {
+                Buffer.BlockCopy(m_Buffer, m_Head, newBuffer, 0, m_Size);
+            }
+            else
+            {
+                Buffer.BlockCopy(m_Buffer, m_Head, newBuffer, 0, m_Buffer.Length - m_Head);
+                Buffer.BlockCopy(m_Buffer, 0, newBuffer, m_Buffer.Length - m_Head, m_Tail);
+            }
+        }
+
+        m_Head = 0;
+        m_Tail = m_Size;
+        m_Buffer = newBuffer;
+    }
+
+    public byte GetPacketID()
+    {
+        if (m_Size >= 19)
+        {
+            return m_Buffer[m_Head];
+        }
+
+        return 0xFF;
+    }
+
+    public int GetPacketLength()
+    {
+        if (m_Size >= 19)
+        {
+            const int OFFSET = 1 + 16 - 1;
+            return (m_Buffer[(m_Head + OFFSET + 2) % m_Buffer.Length] << 8) | m_Buffer[(m_Head + OFFSET + 1) % m_Buffer.Length];
+        }
+
+        return 0;
+    }
+
+    public int Dequeue(byte[] buffer, int offset, int size)
+    {
+        if (size > m_Size)
+        {
+            size = m_Size;
+        }
+
+        if (size == 0)
+        {
+            return 0;
+        }
+
+        if (buffer != null)
+        {
+            if (m_Head < m_Tail)
+            {
+                Buffer.BlockCopy(m_Buffer, m_Head, buffer, offset, size);
+            }
+            else
+            {
+                int rightLength = (m_Buffer.Length - m_Head);
+
+                if (rightLength >= size)
+                {
+                    Buffer.BlockCopy(m_Buffer, m_Head, buffer, offset, size);
+                }
+                else
+                {
+                    Buffer.BlockCopy(m_Buffer, m_Head, buffer, offset, rightLength);
+                    Buffer.BlockCopy(m_Buffer, 0, buffer, offset + rightLength, size - rightLength);
+                }
+            }
+        }
+
+        m_Head = (m_Head + size) % m_Buffer.Length;
+        m_Size -= size;
+
+        if (m_Size == 0)
+        {
+            m_Head = 0;
+            m_Tail = 0;
+        }
+
+        return size;
+    }
+
+    public void Enqueue(byte[] buffer, int offset, int size)
+    {
+        if ((m_Size + size) > m_Buffer.Length)
+        {
+            SetCapacity((m_Size + size + 2047) & ~2047);
+        }
+
+        if (m_Head < m_Tail)
+        {
+            int rightLength = (m_Buffer.Length - m_Tail);
+
+            if (rightLength >= size)
+            {
+                Buffer.BlockCopy(buffer, offset, m_Buffer, m_Tail, size);
+            }
+            else
+            {
+                Buffer.BlockCopy(buffer, offset, m_Buffer, m_Tail, rightLength);
+                Buffer.BlockCopy(buffer, offset + rightLength, m_Buffer, 0, size - rightLength);
+            }
+        }
+        else
+        {
+            Buffer.BlockCopy(buffer, offset, m_Buffer, m_Tail, size);
+        }
+
+        m_Tail = (m_Tail + size) % m_Buffer.Length;
+        m_Size += size;
+    }
 }
