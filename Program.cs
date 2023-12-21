@@ -1,4 +1,6 @@
-﻿using System;
+﻿using ClassicUO.Host;
+using System;
+using System.Linq;
 using System.Net;
 using System.Threading;
 
@@ -17,54 +19,95 @@ if (args.Length >= 2)
     port = int.Parse(args[1]);
 }
 
-
-var server2 = new TcpServerRpc();
-var clientId = Guid.Empty;
-server2.OnClientConnected += id =>
-{
-    Console.WriteLine("[SERVER] Client connected {0}", id);
-    clientId = id;
-};
-server2.OnClientDisconnected += id =>
-{
-    Console.WriteLine("[SERVER] Client disconnected {0}", id);
-};
-server2.OnClientMessage += msg =>
-{
-#if DEBUG
-    Console.WriteLine("[SERVER] client msg received << cmd: {0}, id: {1}, size: {2} bytes", msg.Command, msg.ID, msg.Payload.Count);
-#endif
-};
-server2.Start(address, port);
+var cuoServer = new CuoCustomServer();
+cuoServer.Start(address, port);
+var pluginLoader = new Plugin(cuoServer);
+pluginLoader.Load(@"");
 
 Console.ReadLine();
 
-var client2 = new TcpClientRpc();
-client2.OnServerMessage += msg =>
-{
-    Console.WriteLine("[CLIENT] server msg received << cmd: {0}, id: {1}", msg.Command, msg.ID);
-};
+var server = new BaseServer();
+server.Start(address, port);
+
+Console.ReadLine();
+
+var client2 = new BaseClient();
 client2.Connect(address, port);
 
 Thread.Sleep(1000);
 
-var buf = new byte[6000];
-buf[0] = 123;
-var resp = server2.Request( clientId,new ArraySegment<byte>(buf));
+server.SendTest();
 
 while (true)
 {
-
     var key = Console.ReadKey();
     if (key.Key == ConsoleKey.A)
     {
-        //server2.Stop();
+        server.Stop();
         //resp = client2.Request(new ArraySegment<byte>(buf));
-        client2.Disconnect();
+        //client2.Disconnect();
     }
-    //
-    //var respFromClient = server2.Request(clientId, new ArraySegment<byte>(Array.Empty<byte>()));
-    //var respoFromServer = client2.Request(new ArraySegment<byte>(Array.Empty<byte>())); 
 
     Thread.Sleep(1);
+}
+
+
+sealed class BaseServer : TcpServerRpc
+{
+    protected override void OnClientConnected(Guid id)
+    {
+        Console.WriteLine("[SERVER] Client connected {0}", id);
+    }
+
+    protected override void OnClientDisconnected(Guid id)
+    {
+        Console.WriteLine("[SERVER] Client disconnected {0}", id);
+    }
+
+    protected override void OnMessage(RpcMessage msg)
+    {
+#if DEBUG
+        Console.WriteLine("[SERVER] client msg received << cmd: {0}, id: {1}, size: {2} bytes", msg.Command, msg.ID, msg.Payload.Count);
+#endif
+
+        switch (msg.Command)
+        {
+            case RpcCommand.Request:
+                //Array.Clear(msg.Payload.Array, msg.Payload.Offset, msg.Payload.Count);
+                break;
+
+            case RpcCommand.Response:
+                break;
+        }
+    }
+
+    public RpcMessage SendTest()
+    {
+        if (Clients.Count <= 0)
+            return default;
+
+        var buf = new byte[6000];
+        buf[0] = 123;
+        return Request(Clients.FirstOrDefault().Key, new ArraySegment<byte>(buf));
+    }
+}
+
+sealed class BaseClient : TcpClientRpc
+{
+    protected override void OnConnected()
+    {
+        Console.WriteLine("[CLIENT] connected!");
+    }
+
+    protected override void OnDisconnected()
+    {
+        Console.WriteLine("[CLIENT] disconnected!");
+    }
+
+    protected override void OnMessage(RpcMessage msg)
+    {
+#if DEBUG
+        Console.WriteLine("[CLIENT] server msg received << cmd: {0}, id: {1}", msg.Command, msg.ID);
+#endif
+    }
 }
