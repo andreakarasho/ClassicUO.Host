@@ -3,27 +3,34 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using ClassicUO.Host;
 using CUO_API;
 
-sealed unsafe class Plugin
+
+sealed class Plugin
 {
     public static List<Plugin> Plugins { get; } = new List<Plugin>();
 
 
     private readonly CuoCustomServer _server;
 
-    public Plugin(CuoCustomServer server)
+    public Plugin(CuoCustomServer server, Guid clientID)
     {
         _server = server;
+        ClientID = clientID;
     }
 
-    public void Load(string pluginPath)
+
+    public Guid ClientID { get;  }
+
+    public unsafe void Load(string pluginPath)
     {
         if (!File.Exists(pluginPath))
             return;
 
-        var asm = Assembly.LoadFile(pluginPath);
+        var asm = Assembly.LoadFrom(pluginPath);
         var type = asm.GetType("Assistant.Engine");
 
         if (type == null)
@@ -192,10 +199,17 @@ sealed unsafe class Plugin
     }
 
 
+    public void Close()
+    {
+        OnClosing();
+        //WinApi.CloseWindow();
+    }
+
+
     short GetPacketLength(int packetId)
     {
         // get from cuo
-        return _server.GetPackeLen(Guid.Empty);
+        return _server.GetPackeLen(ClientID).GetAwaiter().GetResult();
     }
 
     void CastSpell(int index)
@@ -206,6 +220,7 @@ sealed unsafe class Plugin
     bool OnPluginRecv(ref byte[] data, ref int length)
     {
         // get from cuo
+        var resp = _server.OnPluginRecv(ClientID, data, length);
 
         return true;
     }
@@ -213,13 +228,15 @@ sealed unsafe class Plugin
     bool OnPluginSend(ref byte[] data, ref int length)
     {
         // get from cuo
+        var resp = _server.OnPluginSend(ClientID, data, length);
 
         return true;
     }
 
     bool OnPluginRecv_new(IntPtr buffer, ref int length)
     {
-        // get from cuo
+        // get from 
+        var resp = _server.OnPluginRecv(ClientID, buffer, length);
 
         return true;
     }
@@ -227,6 +244,7 @@ sealed unsafe class Plugin
     bool OnPluginSend_new(IntPtr buffer, ref int length)
     {
         // get from cuo
+        var resp = _server.OnPluginSend(ClientID, buffer, length);
 
         return true;
     }
@@ -287,26 +305,33 @@ sealed unsafe class Plugin
 
     bool RequestMove(int dir, bool run)
     {
-    // get from cuo
+        // get from cuo
 
-    return true;
+        return true;
     }
 
     bool GetPlayerPosition(out int x, out int y, out int z)
     {
-    // get from cuo
-
-    x = y = z = 0;
-
-    return false;
-    }
-
-    void Tick()
-    {
         // get from cuo
+
+        x = y = z = 0;
+
+        return false;
     }
 
-    bool ProcessRecvPacket(byte[] data, ref int length)
+    public void Tick()
+    {
+        try
+        {
+            _tick?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.ToString());
+        }
+    }
+
+    public bool ProcessRecvPacket(byte[] data, ref int length)
     {
         var result = true;
         if (_onRecv_new != null)
@@ -323,7 +348,7 @@ sealed unsafe class Plugin
         return result;
     }
 
-    bool ProcessSendPacket(ref Span<byte> message)
+    public bool ProcessSendPacket(ref Span<byte> message)
     {
         var result = true;
         if (_onSend_new != null)
@@ -356,47 +381,47 @@ sealed unsafe class Plugin
         Plugins.Remove(this);
     }
 
-    void OnFocusGained()
+    public void FocusGained()
     {
         _onFocusGained?.Invoke();
     }
 
-    void OnFocusLost()
+    public void FocusLost()
     {
         _onFocusLost?.Invoke();
     }
 
-    void OnConnected()
+    public void Connected()
     {
         _onConnected?.Invoke();
     }
 
-    void OnDisconnected()
+    public void Disconnected()
     {
         _onDisconnected?.Invoke();
     }
 
-    bool ProcessHotkeys(int key, int mod, bool ispressed)
+    public bool ProcessHotkeys(int key, int mod, bool ispressed)
     {
         var result = _onHotkeyPressed?.Invoke(key, mod, ispressed) ?? false;
 
         return result;
     }
 
-    void ProcessMouse(int button, int wheel)
+    public void ProcessMouse(int button, int wheel)
     {
         _onMouse?.Invoke(button, wheel);
     }
 
 
-    int ProcessWndProc(void* e)
+    public unsafe int ProcessWndProc(void* e)
     {
         var result = _on_wnd_proc(e);
 
         return result;
     }
 
-    void UpdatePlayerPosition(int x, int y, int z)
+    public void UpdatePlayerPosition(int x, int y, int z)
     {
         try
         {
@@ -496,7 +521,7 @@ sealed unsafe class Plugin
 
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void OnInstall(void* header);
+    private unsafe delegate void OnInstall(void* header);
 
     [return: MarshalAs(UnmanagedType.I1)]
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -510,7 +535,7 @@ sealed unsafe class Plugin
     private delegate int OnDrawCmdList([Out] out IntPtr cmdlist, ref int size);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int OnWndProc(void* ev);
+    private unsafe delegate int OnWndProc(void* ev);
 
     [return: MarshalAs(UnmanagedType.I1)]
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -543,6 +568,21 @@ sealed unsafe class Plugin
         bool capitalize,
         [Out][MarshalAs(UnmanagedType.LPStr)] out string buffer
     );
+
+
+    static class WinApi
+    {
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = false)]
+        static extern IntPtr SendMessage(IntPtr hWnd, UInt32 Msg, IntPtr wParam, IntPtr lParam);
+
+        //I'd double check this constant, just in case
+        static uint WM_CLOSE = 0x10;
+
+        public static void CloseWindow(IntPtr hWindow)
+        {
+            SendMessage(hWindow, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        }
+    }
 }
 
 struct PluginHeader
