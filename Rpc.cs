@@ -1,6 +1,5 @@
 using System;
-using System.Buffers;
-using System.Collections;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -8,128 +7,9 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
-sealed class Rpc : IDisposable
-{
-    private readonly BinaryReader _reader;
-    private readonly BinaryWriter _writer;
-    private readonly ConcurrentDictionary<Guid, RpcMessage> _messages = new ConcurrentDictionary<Guid, RpcMessage>();
-
-    public Rpc(Stream reader, Stream writer)
-    {
-        _reader = new BinaryReader(reader);
-        _writer = new BinaryWriter(writer);
-    }
-
-
-    public void Dispose()
-    {
-        _messages?.Clear();
-        _reader?.Dispose();
-        _writer?.Dispose();
-    }
-
-    public RpcMessage Request(ArraySegment<byte> payload)
-    {
-        var reqId = SendMessage(payload);
-       // var response = WaitForMessageAsync(reqId, TimeSpan.FromSeconds(10)).ConfigureAwait(false).GetAwaiter().GetResult(); // ReceiveMessage();
-        var response = WaitForMessage(reqId, TimeSpan.FromSeconds(10));
-        //var response = ReceiveMessage();
-
-        Trace.Assert(reqId.Equals(response.ID));
-        Trace.Assert(response.Command == RpcCommand.Response);
-
-        return response;
-    }
-
-    RpcMessage WaitForMessage(Guid id, TimeSpan timeout)
-    {
-        RpcMessage msg = default;
-        //var dt = DateTime.UtcNow;
-        while (_reader.BaseStream.CanRead && !_messages.TryRemove(id, out msg))
-        {
-        }
-
-        return msg;
-    }
-
-    async Task<RpcMessage> WaitForMessageAsync(Guid id, TimeSpan timeout)
-    {
-        await Task.Yield();
-        return WaitForMessage(id, timeout);
-    }
-
-    internal void ResponseTo(RpcMessage request)
-    {
-        _writer.Write((byte)RpcCommand.Response);
-        _writer.Write(request.ID.ToByteArray());
-        _writer.Write((ushort)request.Payload.Count);
-        _writer.Write(request.Payload.Array, request.Payload.Offset, request.Payload.Count);
-        _writer.Flush();
-    }
-
-    private Guid SendMessage(ArraySegment<byte> payload)
-    {
-        var id = Guid.NewGuid();
-        _writer.Write((byte)RpcCommand.Request);
-        _writer.Write(id.ToByteArray());
-        _writer.Write((ushort)payload.Count);
-        _writer.Write(payload.Array, payload.Offset, payload.Count);
-        _writer.Flush();
-        return id;
-    }
-
-    internal RpcMessage ReceiveMessage()
-    {
-        var cmd = (RpcCommand)_reader.BaseStream.ReadByte();
-        if (cmd == RpcCommand.Invalid)
-        {
-            return RpcMessage.Invalid;
-        }
-
-        var id = new Guid(
-            _reader.ReadUInt32(),
-            _reader.ReadUInt16(),
-            _reader.ReadUInt16(),
-            _reader.ReadByte(),
-            _reader.ReadByte(),
-            _reader.ReadByte(),
-            _reader.ReadByte(),
-            _reader.ReadByte(),
-            _reader.ReadByte(),
-            _reader.ReadByte(),
-            _reader.ReadByte()
-        );
-        var payloadSize = _reader.ReadUInt16();
-
-        if (_reader.BaseStream.CanSeek && _reader.BaseStream.Position - 19 + payloadSize > _reader.BaseStream.Length)
-        {
-            return RpcMessage.Invalid;
-        }
-
-#if NETFRAMEWORK
-        var payload = new ArraySegment<byte>(payloadSize == 0 ? Array.Empty<byte>() : new byte[payloadSize], 0, payloadSize);
-#else
-        var payload = payloadSize == 0 ? ArraySegment<byte>.Empty : new ArraySegment<byte>(new byte[payloadSize], 0, payloadSize);
-#endif
-        var read = payloadSize == 0 ? 0 : _reader.Read(payload.Array, payload.Offset, payload.Count);
-
-        if (read != payloadSize)
-        {
-
-        }
-
-        var msg = new RpcMessage(cmd, id, payload);
-
-        if (!_messages.TryAdd(id, msg))
-        {
-
-        }
-
-        return msg;
-    }
-}
 
 static class RpcConst
 {
@@ -139,13 +19,10 @@ static class RpcConst
 abstract class TcpServerRpc
 {
     private TcpListener _server;
-    private readonly ConcurrentDictionary<Guid, ClientSession> _clients = new ConcurrentDictionary<Guid, ClientSession>();
+    private readonly ConcurrentDictionary<Guid, TcpSession> _clients = new ConcurrentDictionary<Guid, TcpSession>();
 
-    //public event Action<RpcMessage> OnClientMessage;
-    //public event Action<Guid> OnClientConnected;
-    //public event Action<Guid> OnClientDisconnected;
 
-    public ConcurrentDictionary<Guid, ClientSession> Clients => _clients;
+    public IReadOnlyDictionary<Guid, TcpSession> Clients => _clients;
 
     public void Start(string address, int port)
     {
@@ -163,19 +40,19 @@ abstract class TcpServerRpc
         _server.Stop();
     }
 
-    public RpcMessage Request(Guid clientId, ArraySegment<byte> payload)
+    public async Task<RpcMessage> Request(Guid clientId, ArraySegment<byte> payload)
     {
         if (_clients.TryGetValue(clientId, out var client))
         {
-            return client.Rpc.Request(payload);
+            return await client.Request(payload);
         }
 
-        return default;
+        return RpcMessage.Invalid;
     }
 
-    protected abstract void OnMessage(RpcMessage msg);
-    protected abstract void OnClientConnected(Guid id);
-    protected abstract void OnClientDisconnected(Guid id);
+    protected abstract void OnMessage(Guid id, RpcMessage msg);
+    protected virtual void OnClientConnected(Guid id) { }
+    protected virtual void OnClientDisconnected(Guid id) { }
 
     void OnAccept(IAsyncResult ar)
     {
@@ -198,7 +75,6 @@ abstract class TcpServerRpc
 
         foreach (var l in _clients)
         {
-            l.Value.Rpc.Dispose();
             l.Value.Client.Close();
             l.Value.Client.Dispose();
         }
@@ -206,16 +82,17 @@ abstract class TcpServerRpc
         _server.Server.Dispose();
         _clients.Clear();
     }
+
     void ProcessClient(TcpClient client)
     {
-        var session = new ClientSession(Guid.NewGuid(), client);
+        var session = new TcpSession(Guid.NewGuid(), client);
 
         session.OnDisconnected += () =>
         {
             _clients.TryRemove(session.Guid, out var _);
             OnClientDisconnected(session.Guid);
         };
-        session.OnMessage += OnMessage;
+        session.OnMessage += msg => OnMessage(session.Guid, msg);
         session.Start();
 
         _clients.TryAdd(session.Guid, session);
@@ -224,19 +101,27 @@ abstract class TcpServerRpc
     }
 }
 
-sealed class ClientSession : IDisposable
+sealed class TcpSession : IDisposable
 {
     private bool _disposed;
-    private readonly AsyncCallback _onRecv;
-    private MemoryStream _incoming;
-    private readonly ByteQueue _queue = new ByteQueue();
+    private readonly ConcurrentDictionary<Guid, TaskCompletionSource<RpcMessage>> _messages = new ConcurrentDictionary<Guid, TaskCompletionSource<RpcMessage>>();
+    private readonly Channel<byte[]> _channelSending;
+    private readonly BlockingCollection<RpcMessage> _collection = new BlockingCollection<RpcMessage>(new ConcurrentQueue<RpcMessage>());
+    private readonly Thread _thread;
 
-    public ClientSession(Guid guid, TcpClient client)
+
+    public TcpSession(Guid guid, TcpClient client)
     {
         Guid = guid;
         Client = client;
-
-        _onRecv = OnReceive;
+        _channelSending = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions()
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = true
+        });
+        _thread = new Thread(ParseMessages) { IsBackground = true };
+        _thread.SetApartmentState(ApartmentState.STA);
     }
 
     public event Action<RpcMessage> OnMessage;
@@ -244,7 +129,6 @@ sealed class ClientSession : IDisposable
 
     public Guid Guid { get; }
     public TcpClient Client { get; }
-    public Rpc Rpc { get; private set; }
 
     public void Dispose()
     {
@@ -252,9 +136,7 @@ sealed class ClientSession : IDisposable
             return;
 
         _disposed = true;
-        Rpc.Dispose();
-        _incoming.Dispose();
-        _queue.Clear();
+        _collection.Dispose();
         Client.Close();
         Client.Dispose();
 
@@ -263,105 +145,208 @@ sealed class ClientSession : IDisposable
 
     public void Start()
     {
-        var stream = Client.GetStream();
-        _queue.Clear();
-
-        _incoming = new MemoryStream(4096);
-        Rpc = new Rpc(_incoming, stream);
-
-        var buf = new byte[4096];
-        stream.BeginRead(buf, 0, buf.Length, _onRecv, buf);
+        _thread.Start();
+        SendLoopAsync();
     }
 
-
-    void OnReceive(IAsyncResult ar)
+    public async Task<RpcMessage> Request(ArraySegment<byte> payload)
     {
+        var buffer = SendMessage(payload, out var reqId);
+
+        var taskSrc = new TaskCompletionSource<RpcMessage>();
+        _messages[reqId] = taskSrc;
+
+        if (!_channelSending.Writer.TryWrite(buffer))
+        {
+
+        }
+
+        var response = await taskSrc.Task.ConfigureAwait(false);
+
+        Trace.Assert(reqId.Equals(response.ID));
+        Trace.Assert(response.Command == RpcCommand.Response);
+
+        return response;
+    }
+
+    private void ResponseTo(RpcMessage request)
+    {
+        var buf = CreateMessage(RpcCommand.Response, request.ID, request.Payload);
+
+        if (!_channelSending.Writer.TryWrite(buf))
+        {
+
+        }
+    }
+
+    private byte[] SendMessage(ArraySegment<byte> payload, out Guid id)
+    {
+        id = Guid.NewGuid();
+
+        return CreateMessage(RpcCommand.Request, id, payload);
+    }
+
+    private byte[] CreateMessage(RpcCommand cmd, Guid id, ArraySegment<byte> payload)
+    {
+        var buf = new byte[19 + payload.Count];
+        using var ms = new MemoryStream(buf);
+        using var writer = new BinaryWriter(ms);
+        writer.Write((byte)cmd);
+        writer.Write(id.ToByteArray());
+        writer.Write((ushort)payload.Count);
+        writer.Write(payload.Array, payload.Offset, payload.Count);
+        writer.Flush();
+        return buf;
+    }
+
+    async void RunReceiveLoop()
+    {
+        var buf = new byte[ushort.MaxValue + 1];
+        var readBuffer = Array.Empty<byte>().AsMemory();
+
         try
         {
-            if (!Client.Connected)
+            var socket = Client.Client;
+            while (Client.Connected)
             {
-                Dispose();
-                
-                return;
+                ReadOnlyMemory<byte> value = Array.Empty<byte>();
+
+                if (readBuffer.Length == 0)
+                {
+                    var xs = new ArraySegment<byte>(buf, 0, buf.Length);
+                    var read = await socket.ReceiveAsync(xs, SocketFlags.None).ConfigureAwait(false);
+                    if (read <= 0)
+                        break;
+
+                    readBuffer = buf.AsMemory(0, read);
+                }
+                else if (readBuffer.Length < 19)
+                {
+                    var xs = new ArraySegment<byte>(buf, 0, buf.Length);
+                    var readLen = await socket.ReceiveAsync(xs, SocketFlags.None).ConfigureAwait(false);
+                    if (readLen == 0) break;
+                    var newBuffer = new byte[readBuffer.Length + readLen];
+                    readBuffer.CopyTo(newBuffer);
+                    buf.AsSpan(readLen).CopyTo(newBuffer.AsSpan(readBuffer.Length));
+                    readBuffer = newBuffer;
+                }
+
+                if (readBuffer.Span.Length < 19)
+                {
+                    continue;
+                }
+
+                var cmd = (RpcCommand)readBuffer.Span[0];
+                var id = new Guid
+                (
+                    BinaryPrimitives.ReadUInt32LittleEndian(readBuffer.Span.Slice(1, 4)),
+                    BinaryPrimitives.ReadUInt16LittleEndian(readBuffer.Span.Slice(1 + 4, 2)),
+                    BinaryPrimitives.ReadUInt16LittleEndian(readBuffer.Span.Slice(1 + 4 + 2, 2)),
+                    readBuffer.Span[1 + 4 + 2 + 2],
+                    readBuffer.Span[1 + 4 + 2 + 2 + 1],
+                    readBuffer.Span[1 + 4 + 2 + 2 + 1 + 1],
+                    readBuffer.Span[1 + 4 + 2 + 2 + 1 + 1 + 1],
+                    readBuffer.Span[1 + 4 + 2 + 2 + 1 + 1 + 1 + 1],
+                    readBuffer.Span[1 + 4 + 2 + 2 + 1 + 1 + 1 + 1 + 1],
+                    readBuffer.Span[1 + 4 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1],
+                    readBuffer.Span[1 + 4 + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1]
+                );
+
+                var payloadLen = BinaryPrimitives.ReadUInt16LittleEndian(readBuffer.Span.Slice(1 + 16, 2));
+
+                if (readBuffer.Length == (payloadLen + 19)) // just size
+                {
+                    value = readBuffer.Slice(19, payloadLen); // skip length header
+                    readBuffer = Array.Empty<byte>();
+                    goto PARSE_MESSAGE;
+                }
+                else if (readBuffer.Length > (payloadLen + 19)) // over size
+                {
+                    value = readBuffer.Slice(19, payloadLen);
+                    readBuffer = readBuffer.Slice(payloadLen + 19);
+                    goto PARSE_MESSAGE;
+                }
+                else
+                {
+                    continue;
+                }
+
+            PARSE_MESSAGE:
+                var msg = new RpcMessage(cmd, id, new ArraySegment<byte>(value.ToArray()));
+
+                if (cmd == RpcCommand.Response)
+                {
+                    if (_messages.TryRemove(msg.ID, out var task))
+                    {
+                        if (!task.TrySetResult(msg))
+                        {
+
+                        }
+                    }
+                }
+                else
+                {
+                    while (!_collection.TryAdd(msg))
+                        Thread.Sleep(1);
+                }
             }
-
-            var stream = Client.GetStream();
-            var read = stream.EndRead(ar);
-            if (read <= 0)
-            {
-                Dispose();
-
-                return;
-            }
-
-            var buf = (byte[])ar.AsyncState;
-
-            lock (_queue)
-                _queue.Enqueue(buf, 0, read);
-
-            ProcessIncomingMessages();
-
-            stream.BeginRead(buf, 0, buf.Length, _onRecv, buf);
         }
         catch (Exception ex)
         {
             Console.WriteLine("Client session exception: {0}", ex);
+        }
 
-            Dispose();
+        Dispose();
+    }
+
+    void ParseMessages()
+    {
+        while (Client.Connected)
+        {
+            var msg = _collection.Take();
+
+            ParseMessage(msg);
         }
     }
 
-    void ProcessIncomingMessages()
+    private void ParseMessage(RpcMessage msg)
     {
-        const int RPC_HEADER_SIZE = 19;
+        OnMessage(msg);
 
-        var buffer = _queue;
-
-        if (buffer == null || buffer.Length <= 0)
-            return;
-
-        lock (buffer)
+        switch (msg.Command)
         {
-            var len = buffer.Length;
-            while (len > 0)
-            {
-                var cmd = (RpcCommand) buffer.GetPacketID();
-                if (cmd == RpcCommand.Invalid)
-                    return;
+            case RpcCommand.Request:
+                ResponseTo(msg);
+                break;
 
-                var packetLen = buffer.GetPacketLength() + RPC_HEADER_SIZE;
-                if (len < packetLen)
-                    return;
-
-                var buf = ArrayPool<byte>.Shared.Rent(packetLen);
-                packetLen = buffer.Dequeue(buf, 0, packetLen);
-
-                // TODO: remove the memorystream and use the underlying SendQueue buffer
-                _incoming.Write(buf, 0, packetLen);
-
-                ArrayPool<byte>.Shared.Return(buf);
-
-                _incoming.Seek(0, SeekOrigin.Begin);
-
-                // TODO: read the msg structure just once. We already read the cmd + payloadSize
-                //       maybe worth an header change: [cmd][payloadsize][guid][payload] ?
-                var msg = Rpc.ReceiveMessage();
-
-                OnMessage?.Invoke(msg);
-
-                switch (cmd)
+            case RpcCommand.Response:
+                if (_messages.TryRemove(msg.ID, out var task))
                 {
-                    case RpcCommand.Request:
-                        Rpc.ResponseTo(msg);
-                        break;
+                    if (!task.TrySetResult(msg))
+                    {
 
-                    case RpcCommand.Response:
-                        break;
+                    }
                 }
+                else
+                {
 
-                _incoming.Seek(0, SeekOrigin.Begin);
+                }
+                break;
+        }
+    }
 
-                len = buffer.Length;
+    async void SendLoopAsync()
+    {
+        var reader = _channelSending.Reader;
+        var socket = Client.Client;
+        RunReceiveLoop();
+
+        while (await reader.WaitToReadAsync().ConfigureAwait(false))
+        {
+            while (reader.TryRead(out var item))
+            {
+                var xs = new ArraySegment<byte>(item);
+                await socket.SendAsync(xs, SocketFlags.None).ConfigureAwait(false);
             }
         }
     }
@@ -369,7 +354,7 @@ sealed class ClientSession : IDisposable
 
 abstract class TcpClientRpc
 {
-    private ClientSession _session;
+    private TcpSession _session;
 
     public bool IsConnected => _session?.Client?.Connected ?? false;
 
@@ -394,29 +379,31 @@ abstract class TcpClientRpc
     {
         var tcp = (TcpClient)ar.AsyncState;
         tcp.EndConnect(ar);
-        OnConnected();
 
-        _session = new ClientSession(Guid.Empty, tcp);
+        _session = new TcpSession(Guid.Empty, tcp);
         _session.OnDisconnected += OnDisconnected;
-        _session.OnMessage += OnMessage;
+        _session.OnMessage += msg => OnMessage(msg);
         _session.Start();
+
+        OnConnected();
     }
 
     public void Disconnect()
     {
         _session?.Client?.Client?.Disconnect(false);
-        //_session?.Dispose();
-        //OnDisconnected();
     }
 
-    public RpcMessage Request(ArraySegment<byte> payload)
+    public async Task<RpcMessage> Request(ArraySegment<byte> payload)
     {
-        return _session.Rpc.Request(payload);
+        if (_session == null)
+            return RpcMessage.Invalid;
+
+        return await _session.Request(payload);
     }
 
     protected abstract void OnMessage(RpcMessage msg);
-    protected abstract void OnConnected();
-    protected abstract void OnDisconnected();
+    protected virtual void OnConnected() { }
+    protected virtual void OnDisconnected() { }
 }
 
 readonly struct RpcMessage
@@ -436,146 +423,4 @@ enum RpcCommand
     Invalid = -1,
     Request,
     Response
-}
-
-sealed class ByteQueue
-{
-    private int m_Head;
-    private int m_Tail;
-    private int m_Size;
-
-    private byte[] m_Buffer;
-
-    public int Length { get { return m_Size; } }
-
-    public ByteQueue()
-    {
-        m_Buffer = new byte[2048];
-    }
-
-    public void Clear()
-    {
-        m_Head = 0;
-        m_Tail = 0;
-        m_Size = 0;
-    }
-
-    private void SetCapacity(int capacity)
-    {
-        var newBuffer = new byte[capacity];
-
-        if (m_Size > 0)
-        {
-            if (m_Head < m_Tail)
-            {
-                Buffer.BlockCopy(m_Buffer, m_Head, newBuffer, 0, m_Size);
-            }
-            else
-            {
-                Buffer.BlockCopy(m_Buffer, m_Head, newBuffer, 0, m_Buffer.Length - m_Head);
-                Buffer.BlockCopy(m_Buffer, 0, newBuffer, m_Buffer.Length - m_Head, m_Tail);
-            }
-        }
-
-        m_Head = 0;
-        m_Tail = m_Size;
-        m_Buffer = newBuffer;
-    }
-
-    public byte GetPacketID()
-    {
-        if (m_Size >= 19)
-        {
-            return m_Buffer[m_Head];
-        }
-
-        return 0xFF;
-    }
-
-    public int GetPacketLength()
-    {
-        if (m_Size >= 19)
-        {
-            const int OFFSET = 1 + 16 - 1;
-            return (m_Buffer[(m_Head + OFFSET + 2) % m_Buffer.Length] << 8) | m_Buffer[(m_Head + OFFSET + 1) % m_Buffer.Length];
-        }
-
-        return 0;
-    }
-
-    public int Dequeue(byte[] buffer, int offset, int size)
-    {
-        if (size > m_Size)
-        {
-            size = m_Size;
-        }
-
-        if (size == 0)
-        {
-            return 0;
-        }
-
-        if (buffer != null)
-        {
-            if (m_Head < m_Tail)
-            {
-                Buffer.BlockCopy(m_Buffer, m_Head, buffer, offset, size);
-            }
-            else
-            {
-                int rightLength = (m_Buffer.Length - m_Head);
-
-                if (rightLength >= size)
-                {
-                    Buffer.BlockCopy(m_Buffer, m_Head, buffer, offset, size);
-                }
-                else
-                {
-                    Buffer.BlockCopy(m_Buffer, m_Head, buffer, offset, rightLength);
-                    Buffer.BlockCopy(m_Buffer, 0, buffer, offset + rightLength, size - rightLength);
-                }
-            }
-        }
-
-        m_Head = (m_Head + size) % m_Buffer.Length;
-        m_Size -= size;
-
-        if (m_Size == 0)
-        {
-            m_Head = 0;
-            m_Tail = 0;
-        }
-
-        return size;
-    }
-
-    public void Enqueue(byte[] buffer, int offset, int size)
-    {
-        if ((m_Size + size) > m_Buffer.Length)
-        {
-            SetCapacity((m_Size + size + 2047) & ~2047);
-        }
-
-        if (m_Head < m_Tail)
-        {
-            int rightLength = (m_Buffer.Length - m_Tail);
-
-            if (rightLength >= size)
-            {
-                Buffer.BlockCopy(buffer, offset, m_Buffer, m_Tail, size);
-            }
-            else
-            {
-                Buffer.BlockCopy(buffer, offset, m_Buffer, m_Tail, rightLength);
-                Buffer.BlockCopy(buffer, offset + rightLength, m_Buffer, 0, size - rightLength);
-            }
-        }
-        else
-        {
-            Buffer.BlockCopy(buffer, offset, m_Buffer, m_Tail, size);
-        }
-
-        m_Tail = (m_Tail + size) % m_Buffer.Length;
-        m_Size += size;
-    }
 }
