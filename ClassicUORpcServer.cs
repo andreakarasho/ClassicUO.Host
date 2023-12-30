@@ -1,11 +1,12 @@
 ﻿using System;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Threading;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace ClassicUO.Host
 {
-    internal class CuoCustomServer : TcpServerRpc
+    sealed class ClassicUORpcServer : TcpServerRpc
     {
         enum PluginCuoProtocol : byte
         {
@@ -32,7 +33,8 @@ namespace ClassicUO.Host
 
         protected override void OnClientConnected(Guid id)
         {
-            
+            var plugin = new Plugin(this, id);
+            _plugins.TryAdd(id, plugin);
         }
 
         protected override void OnClientDisconnected(Guid id)
@@ -51,25 +53,20 @@ namespace ClassicUO.Host
             if (msg.Payload.Count == 0)
                 return;
 
-            var cuoProtcolID = (PluginCuoProtocol)msg.Payload.Array[msg.Payload.Offset + 0];
-
             if (!_plugins.TryGetValue(id, out Plugin plugin))
-            {
-                if (cuoProtcolID == PluginCuoProtocol.OnInitialize)
-                {
-                    plugin = new Plugin(this, id);
-                    var razorPath = @"";
-                    plugin.Load(razorPath);
-                    _plugins.TryAdd(id, plugin);
-                }
-
                 return;
-            }
+
+            var cuoProtcolID = (PluginCuoProtocol)msg.Payload.Array[msg.Payload.Offset + 0];
 
             switch (cuoProtcolID)
             {
                 case PluginCuoProtocol.OnInitialize:
-                   
+                    var clientVersion = BinaryPrimitives.ReadUInt32LittleEndian(msg.Payload.AsSpan(1, sizeof(uint)));
+                    var pluginPathlen = BinaryPrimitives.ReadInt16LittleEndian(msg.Payload.AsSpan(1 + sizeof(uint), sizeof(ushort)));
+                    var pluginPath = Encoding.UTF8.GetString(msg.Payload.Array, 1 + sizeof(uint) + sizeof(ushort), pluginPathlen);
+                    var assetsPathLen = BinaryPrimitives.ReadInt16LittleEndian(msg.Payload.AsSpan(1 + sizeof(uint) + sizeof(ushort) + pluginPathlen, sizeof(ushort)));
+                    var assetsPath = Encoding.UTF8.GetString(msg.Payload.Array, 1 + sizeof(uint) + sizeof(ushort) * 2 + pluginPathlen, assetsPathLen);
+                    plugin.Load(pluginPath, clientVersion, assetsPath);
                     break;
                 case PluginCuoProtocol.OnTick:
                     plugin.Tick();
@@ -90,8 +87,19 @@ namespace ClassicUO.Host
                     plugin.Disconnected();
                     break;
                 case PluginCuoProtocol.OnHotkey:
+                    {
+                        var key = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1, sizeof(int)));
+                        var mod = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1 + sizeof(int), sizeof(int)));
+                        var isPressed = msg.Payload.AsSpan(1 + sizeof(int) * 2, 1)[0] == 0x01;
+                        var ok = plugin.ProcessHotkeys(key, mod, isPressed);
+                    }
                     break;
                 case PluginCuoProtocol.OnMouse:
+                    {
+                        var button = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1, sizeof(int)));
+                        var wheel = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1 + sizeof(int), sizeof(int)));
+                        plugin.ProcessMouse(button, wheel);
+                    }
                     break;
                 case PluginCuoProtocol.OnCmdList:
                     break;

@@ -1,36 +1,95 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Policy;
 using System.Threading;
 using System.Threading.Tasks;
 using ClassicUO.Host;
 using CUO_API;
 
 
+public class Proxy : MarshalByRefObject
+{
+    public Assembly LoadFrom(string assemblyPath)
+    {
+        try
+        {
+            var assembly = AppDomain.CurrentDomain.Load(File.ReadAllBytes(assemblyPath));
+            return assembly;
+            return Assembly.LoadFile(assemblyPath);
+        }
+        catch (Exception)
+        {
+            return null;
+            // throw new InvalidOperationException(ex);
+        }
+    }
+}
+
 sealed class Plugin
 {
     public static List<Plugin> Plugins { get; } = new List<Plugin>();
 
 
-    private readonly CuoCustomServer _server;
+    private readonly ClassicUORpcServer _server;
 
-    public Plugin(CuoCustomServer server, Guid clientID)
+    public Plugin(ClassicUORpcServer server, Guid clientID)
     {
         _server = server;
         ClientID = clientID;
     }
 
 
-    public Guid ClientID { get;  }
+    public Guid ClientID { get; }
+    public string AssetsPath { get; private set; }
 
-    public unsafe void Load(string pluginPath)
+    public unsafe void Load(string pluginPath, uint clientVersion, string assetsPath)
     {
         if (!File.Exists(pluginPath))
             return;
 
-        var asm = Assembly.LoadFrom(pluginPath);
+        AssetsPath = assetsPath;
+
+        //var domaininfo = new AppDomainSetup();
+        //domaininfo.ApplicationBase = Environment.CurrentDirectory;
+        //domaininfo.ShadowCopyFiles = "true";
+        //domaininfo.LoaderOptimization = LoaderOptimization.MultiDomainHost;
+        //var adevidence = AppDomain.CurrentDomain.Evidence;
+
+        //var domain = AppDomain.CreateDomain("MyDomain", null, domaininfo);
+
+        //domain.AssemblyResolve += (o, ee) =>
+        //{
+        //    return Assembly.LoadFrom(ee.Name);
+        //};
+        //domain.AssemblyLoad += (o, ee) =>
+        //{
+        //    Console.WriteLine();
+        //};
+        //domain.ReflectionOnlyAssemblyResolve += (o, ee) =>
+        //{
+        //    return null;
+        //};
+
+        //var proxyType = typeof(Proxy);
+        //var value = (Proxy)domain.CreateInstanceFromAndUnwrap(
+        //    proxyType.Assembly.Location,
+        //    proxyType.FullName);
+
+
+        if (
+            Environment.OSVersion.Platform != PlatformID.Unix
+            && Environment.OSVersion.Platform != PlatformID.MacOSX
+        )
+        {
+            UnblockPath(Path.GetDirectoryName(pluginPath));
+        }
+
+
+        var asm = Assembly.LoadFile(pluginPath);
         var type = asm.GetType("Assistant.Engine");
 
         if (type == null)
@@ -48,7 +107,6 @@ sealed class Plugin
             return;
         }
 
-        var clientVersion_TODO = 117466370;
         var hwnd_TODO = IntPtr.Zero;
         var sdlWnd_TODO = IntPtr.Zero;
 
@@ -69,7 +127,7 @@ sealed class Plugin
 
         var header = new PluginHeader()
         {
-            ClientVersion = clientVersion_TODO,
+            ClientVersion = (int)clientVersion,
             Recv = Marshal.GetFunctionPointerForDelegate(_recv),
             Send = Marshal.GetFunctionPointerForDelegate(_send),
             GetPacketLength = Marshal.GetFunctionPointerForDelegate(_getPacketLength),
@@ -198,6 +256,34 @@ sealed class Plugin
         Plugins.Add(this);
     }
 
+    //Code from https://stackoverflow.com/questions/6374673/unblock-file-from-within-net-4-c-sharp
+    private static void UnblockPath(string path)
+    {
+        string[] files = Directory.GetFiles(path);
+        string[] dirs = Directory.GetDirectories(path);
+
+        foreach (string file in files)
+        {
+            if (file.EndsWith("dll") || file.EndsWith("exe"))
+            {
+                UnblockFile(file);
+            }
+        }
+
+        foreach (string dir in dirs)
+        {
+            UnblockPath(dir);
+        }
+    }
+
+    private static bool UnblockFile(string fileName)
+    {
+        return DeleteFile(fileName + ":Zone.Identifier");
+    }
+
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteFile(string name);
 
     public void Close()
     {
@@ -209,7 +295,7 @@ sealed class Plugin
     short GetPacketLength(int packetId)
     {
         // get from cuo
-        return _server.GetPackeLen(ClientID).GetAwaiter().GetResult();
+        return AsyncHelpers.RunSync(() => _server.GetPackeLen(ClientID));
     }
 
     void CastSpell(int index)
@@ -220,7 +306,10 @@ sealed class Plugin
     bool OnPluginRecv(ref byte[] data, ref int length)
     {
         // get from cuo
-        var resp = _server.OnPluginRecv(ClientID, data, length);
+        //var resp = _server.OnPluginRecv(ClientID, data, length);
+        var dataCopy = data.ToArray();
+        var lenCopy = length;
+        return AsyncHelpers.RunSync(() => _server.OnPluginRecv(ClientID, dataCopy, lenCopy));
 
         return true;
     }
@@ -228,7 +317,11 @@ sealed class Plugin
     bool OnPluginSend(ref byte[] data, ref int length)
     {
         // get from cuo
-        var resp = _server.OnPluginSend(ClientID, data, length);
+        //var resp = _server.OnPluginSend(ClientID, data, length);
+
+        var dataCopy = data.ToArray();
+        var lenCopy = length;
+        return AsyncHelpers.RunSync(() => _server.OnPluginSend(ClientID, dataCopy, lenCopy));
 
         return true;
     }
@@ -236,7 +329,10 @@ sealed class Plugin
     bool OnPluginRecv_new(IntPtr buffer, ref int length)
     {
         // get from 
-        var resp = _server.OnPluginRecv(ClientID, buffer, length);
+        //var resp = _server.OnPluginRecv(ClientID, buffer, length);
+
+        var lenCopy = length;
+        return AsyncHelpers.RunSync(() => _server.OnPluginRecv(ClientID, buffer, lenCopy));
 
         return true;
     }
@@ -244,7 +340,10 @@ sealed class Plugin
     bool OnPluginSend_new(IntPtr buffer, ref int length)
     {
         // get from cuo
-        var resp = _server.OnPluginSend(ClientID, buffer, length);
+        //var resp = _server.OnPluginSend(ClientID, buffer, length);
+
+        var lenCopy = length;
+        return AsyncHelpers.RunSync(() => _server.OnPluginRecv(ClientID, buffer, lenCopy));
 
         return true;
     }
@@ -252,7 +351,7 @@ sealed class Plugin
     string GetUOFilePath()
     {
         // get from cuo
-        return "";
+        return AssetsPath;
     }
 
     void SetWindowTitle(string str)
