@@ -4,32 +4,11 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security.Policy;
-using System.Threading;
-using System.Threading.Tasks;
 using ClassicUO.Host;
 using CUO_API;
 
 
-public class Proxy : MarshalByRefObject
-{
-    public Assembly LoadFrom(string assemblyPath)
-    {
-        try
-        {
-            var assembly = AppDomain.CurrentDomain.Load(File.ReadAllBytes(assemblyPath));
-            return assembly;
-            return Assembly.LoadFile(assemblyPath);
-        }
-        catch (Exception)
-        {
-            return null;
-            // throw new InvalidOperationException(ex);
-        }
-    }
-}
-
-sealed class Plugin
+sealed class Plugin 
 {
     public static List<Plugin> Plugins { get; } = new List<Plugin>();
 
@@ -53,33 +32,6 @@ sealed class Plugin
 
         AssetsPath = assetsPath;
 
-        //var domaininfo = new AppDomainSetup();
-        //domaininfo.ApplicationBase = Environment.CurrentDirectory;
-        //domaininfo.ShadowCopyFiles = "true";
-        //domaininfo.LoaderOptimization = LoaderOptimization.MultiDomainHost;
-        //var adevidence = AppDomain.CurrentDomain.Evidence;
-
-        //var domain = AppDomain.CreateDomain("MyDomain", null, domaininfo);
-
-        //domain.AssemblyResolve += (o, ee) =>
-        //{
-        //    return Assembly.LoadFrom(ee.Name);
-        //};
-        //domain.AssemblyLoad += (o, ee) =>
-        //{
-        //    Console.WriteLine();
-        //};
-        //domain.ReflectionOnlyAssemblyResolve += (o, ee) =>
-        //{
-        //    return null;
-        //};
-
-        //var proxyType = typeof(Proxy);
-        //var value = (Proxy)domain.CreateInstanceFromAndUnwrap(
-        //    proxyType.Assembly.Location,
-        //    proxyType.FullName);
-
-
         if (
             Environment.OSVersion.Platform != PlatformID.Unix
             && Environment.OSVersion.Platform != PlatformID.MacOSX
@@ -87,7 +39,6 @@ sealed class Plugin
         {
             UnblockPath(Path.GetDirectoryName(pluginPath));
         }
-
 
         var asm = Assembly.LoadFile(pluginPath);
         var type = asm.GetType("Assistant.Engine");
@@ -288,14 +239,17 @@ sealed class Plugin
     public void Close()
     {
         OnClosing();
-        //WinApi.CloseWindow();
+
+        //var forms = AppDomain.CurrentDomain.GetAssemblies().SingleOrDefault(assembly => assembly.GetName().Name.Contains("System.Windows.Forms"));
+        //var application = forms.GetType("System.Windows.Forms.Application");
+        //var appExitMethod = application.GetMethod("Exit", new Type[0]);
+        //appExitMethod.Invoke(null, null);
     }
 
 
     short GetPacketLength(int packetId)
     {
-        // get from cuo
-        return AsyncHelpers.RunSync(() => _server.GetPackeLen(ClientID));
+        return _server.GetPackeLen(ClientID);
     }
 
     void CastSpell(int index)
@@ -305,47 +259,22 @@ sealed class Plugin
 
     bool OnPluginRecv(ref byte[] data, ref int length)
     {
-        // get from cuo
-        //var resp = _server.OnPluginRecv(ClientID, data, length);
-        var dataCopy = data.ToArray();
-        var lenCopy = length;
-        return AsyncHelpers.RunSync(() => _server.OnPluginRecv(ClientID, dataCopy, lenCopy));
-
-        return true;
+        return _server.OnPluginRecv(ClientID, data, length);
     }
 
     bool OnPluginSend(ref byte[] data, ref int length)
     {
-        // get from cuo
-        //var resp = _server.OnPluginSend(ClientID, data, length);
-
-        var dataCopy = data.ToArray();
-        var lenCopy = length;
-        return AsyncHelpers.RunSync(() => _server.OnPluginSend(ClientID, dataCopy, lenCopy));
-
-        return true;
+        return _server.OnPluginSend(ClientID, data, length);
     }
 
     bool OnPluginRecv_new(IntPtr buffer, ref int length)
     {
-        // get from 
-        //var resp = _server.OnPluginRecv(ClientID, buffer, length);
-
-        var lenCopy = length;
-        return AsyncHelpers.RunSync(() => _server.OnPluginRecv(ClientID, buffer, lenCopy));
-
-        return true;
+        return _server.OnPluginRecv(ClientID, buffer, length);
     }
 
     bool OnPluginSend_new(IntPtr buffer, ref int length)
     {
-        // get from cuo
-        //var resp = _server.OnPluginSend(ClientID, buffer, length);
-
-        var lenCopy = length;
-        return AsyncHelpers.RunSync(() => _server.OnPluginRecv(ClientID, buffer, lenCopy));
-
-        return true;
+        return _server.OnPluginRecv(ClientID, buffer, length);
     }
 
     string GetUOFilePath()
@@ -476,8 +405,6 @@ sealed class Plugin
     {
         // get from cuo
         _onClientClose?.Invoke();
-
-        Plugins.Remove(this);
     }
 
     public void FocusGained()

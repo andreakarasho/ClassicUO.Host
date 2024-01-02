@@ -43,6 +43,8 @@ namespace ClassicUO.Host
             {
                 plugin.Close();
             }
+
+            Environment.Exit(0);
         }
 
         protected override void OnMessage(Guid id, RpcMessage msg)
@@ -133,26 +135,26 @@ namespace ClassicUO.Host
             return;
         }
 
-        public async Task<short> GetPackeLen(Guid id)
+        public short GetPackeLen(Guid id)
         {
             var payload = new ArraySegment<byte>(Array.Empty<byte>());
-            var resp = await Request(id, payload);
+            var resp = Request(id, payload);
             return 0;
         }
 
-        public async Task<bool> OnPluginRecv(Guid id, byte[] buffer, int len)
+        public bool OnPluginRecv(Guid id, byte[] buffer, int len)
         {
             var buf = new byte[1 + len];
             buf[0] = (byte)PluginCuoProtocol.OnPluginRecv;
 
             Array.Copy(buffer, 0, buf, 1, len);
 
-            var req = await Request(id, new ArraySegment<byte>(buf));
+            var req = Request(id, new ArraySegment<byte>(buf));
 
             return true;
         }
 
-        public async Task<bool> OnPluginRecv(Guid id, IntPtr buffer, int len)
+        public bool OnPluginRecv(Guid id, IntPtr buffer, int len)
         {
             var buf = new byte[1 + len];
             buf[0] = (byte)PluginCuoProtocol.OnPluginRecv;
@@ -163,24 +165,24 @@ namespace ClassicUO.Host
                     Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
             }
             
-            var req = await Request(id, new ArraySegment<byte>(buf));
+            var req = Request(id, new ArraySegment<byte>(buf));
 
             return true;
         }
 
-        public async Task<bool> OnPluginSend(Guid id, byte[] buffer, int len)
+        public bool OnPluginSend(Guid id, byte[] buffer, int len)
         {
             var buf = new byte[1 + len];
             buf[0] = (byte)PluginCuoProtocol.OnPluginSend;
 
             Array.Copy(buffer, 0, buf, 1, len);
 
-            var req = await Request(id, new ArraySegment<byte>(buf));
+            var req = Request(id, new ArraySegment<byte>(buf));
 
             return true;
         }
 
-        public async Task<bool> OnPluginSend(Guid id, IntPtr buffer, int len)
+        public bool OnPluginSend(Guid id, IntPtr buffer, int len)
         {
             var buf = new byte[1 + len];
             buf[0] = (byte)PluginCuoProtocol.OnPluginSend;
@@ -191,7 +193,7 @@ namespace ClassicUO.Host
                     Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
             }
 
-            var req = await Request(id, new ArraySegment<byte>(buf));
+            var req = Request(id, new ArraySegment<byte>(buf));
 
             return true;
         }
