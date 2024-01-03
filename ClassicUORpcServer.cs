@@ -1,6 +1,10 @@
-﻿using System;
+﻿using StructPacker;
+using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Drawing;
+using System.Security.Policy;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -8,7 +12,7 @@ namespace ClassicUO.Host
 {
     sealed class ClassicUORpcServer : TcpServerRpc
     {
-        enum PluginCuoProtocol : byte
+        public enum PluginCuoProtocol : byte
         {
             OnInitialize,
             OnTick,
@@ -29,6 +33,52 @@ namespace ClassicUO.Host
             OnPluginSend,
         }
 
+        [Pack]
+        internal struct PluginInitializeRequest
+        {
+            public byte Cmd;
+            public uint ClientVersion;
+            public string PluginPath;
+            public string AssetsPath;
+        }
+
+        [Pack]
+        internal struct PluginHotkeyRequest
+        {
+            public byte Cmd;
+            public int Key;
+            public int Mod;
+            public bool IsPressed;
+        }
+
+        [Pack]
+        internal struct PluginHotkeyResponse
+        {
+            public byte Cmd;
+            public bool Allowed;
+        }
+
+        [Pack]
+        internal struct PluginMouseRequest
+        {
+            public byte Cmd;
+            public int Button;
+            public int Wheel;
+        }
+
+        [Pack]
+        internal struct PluginSimpleRequest
+        {
+            public byte Cmd;
+        }
+
+        [Pack]
+        internal struct PluginPacketRequest
+        {
+            public byte Cmd;
+            public byte[] Packet;
+        }
+
         private readonly ConcurrentDictionary<Guid, Plugin> _plugins = new ConcurrentDictionary<Guid, Plugin>();
 
         protected override void OnClientConnected(Guid id)
@@ -47,28 +97,25 @@ namespace ClassicUO.Host
             Environment.Exit(0);
         }
 
-        protected override void OnMessage(Guid id, RpcMessage msg)
-        {
-            if (msg.Command == RpcCommand.Response)
-                return;
+        static readonly ArraySegment<byte> _empty = new ArraySegment<byte>(Array.Empty<byte>());
 
+        protected override ArraySegment<byte> OnRequest(Guid id, RpcMessage msg)
+        {
             if (msg.Payload.Count == 0)
-                return;
+                return _empty;
 
             if (!_plugins.TryGetValue(id, out Plugin plugin))
-                return;
+                return _empty;
 
             var cuoProtcolID = (PluginCuoProtocol)msg.Payload.Array[msg.Payload.Offset + 0];
 
             switch (cuoProtcolID)
             {
                 case PluginCuoProtocol.OnInitialize:
-                    var clientVersion = BinaryPrimitives.ReadUInt32LittleEndian(msg.Payload.AsSpan(1, sizeof(uint)));
-                    var pluginPathlen = BinaryPrimitives.ReadInt16LittleEndian(msg.Payload.AsSpan(1 + sizeof(uint), sizeof(ushort)));
-                    var pluginPath = Encoding.UTF8.GetString(msg.Payload.Array, 1 + sizeof(uint) + sizeof(ushort), pluginPathlen);
-                    var assetsPathLen = BinaryPrimitives.ReadInt16LittleEndian(msg.Payload.AsSpan(1 + sizeof(uint) + sizeof(ushort) + pluginPathlen, sizeof(ushort)));
-                    var assetsPath = Encoding.UTF8.GetString(msg.Payload.Array, 1 + sizeof(uint) + sizeof(ushort) * 2 + pluginPathlen, assetsPathLen);
-                    plugin.Load(pluginPath, clientVersion, assetsPath);
+                    var initReq = new PluginInitializeRequest();
+                    initReq.Unpack(msg.Payload.Array, msg.Payload.Offset);
+
+                    plugin.Load(initReq.PluginPath, initReq.ClientVersion, initReq.AssetsPath);
                     break;
                 case PluginCuoProtocol.OnTick:
                     plugin.Tick();
@@ -90,17 +137,26 @@ namespace ClassicUO.Host
                     break;
                 case PluginCuoProtocol.OnHotkey:
                     {
-                        var key = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1, sizeof(int)));
-                        var mod = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1 + sizeof(int), sizeof(int)));
-                        var isPressed = msg.Payload.AsSpan(1 + sizeof(int) * 2, 1)[0] == 0x01;
-                        var ok = plugin.ProcessHotkeys(key, mod, isPressed);
+                        var req = new PluginHotkeyRequest();
+                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+
+                        var ok = plugin.ProcessHotkeys(req.Key, req.Mod, req.IsPressed);
+
+                        var resp = new PluginHotkeyResponse()
+                        {
+                            Cmd = (byte)msg.Command,
+                            Allowed = ok,
+                        };
+                        using var buf = resp.PackToBuffer();
+
+                        return new ArraySegment<byte>(buf.Data, 0, buf.Size);
                     }
-                    break;
                 case PluginCuoProtocol.OnMouse:
                     {
-                        var button = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1, sizeof(int)));
-                        var wheel = BinaryPrimitives.ReadInt32LittleEndian(msg.Payload.AsSpan(1 + sizeof(int), sizeof(int)));
-                        plugin.ProcessMouse(button, wheel);
+                        var req = new PluginMouseRequest();
+                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+
+                        plugin.ProcessMouse(req.Button, req.Wheel);
                     }
                     break;
                 case PluginCuoProtocol.OnCmdList:
@@ -111,28 +167,43 @@ namespace ClassicUO.Host
                     break;
                 case PluginCuoProtocol.OnPacketIn:
                     {
-                        var size = msg.Payload.Count - 1;
-                        var buf = new byte[size];
-                        Array.Copy(msg.Payload.Array, msg.Payload.Offset + 1, buf, 0, size);
-                        var ok = plugin.ProcessRecvPacket(buf, ref size);
-                        Array.Copy(buf, 0, msg.Payload.Array, 1, size);
-                    }
-                   
-                    break;
+                        var req = new PluginPacketRequest();
+                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+
+                        var packetLen = req.Packet.Length;
+                        var ok = plugin.ProcessRecvPacket(ref req.Packet, ref packetLen);
+
+                        var resp = new PluginPacketRequest()
+                        {
+                            Cmd = req.Cmd,
+                            Packet = ok ? req.Packet : Array.Empty<byte>(),
+                        };
+
+                        using var buf = resp.PackToBuffer();
+
+                        return new ArraySegment<byte>(buf.Data, 0, buf.Size);
+                    }            
                 case PluginCuoProtocol.OnPacketOut:
                     {
-                        var size = msg.Payload.Count - 1;
-                        var buf = new byte[size];
-                        Array.Copy(msg.Payload.Array, msg.Payload.Offset + 1, buf, 0, size);
-                        var span = buf.AsSpan(0, size);
+                        var req = new PluginPacketRequest();
+                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+
+                        var span = req.Packet.AsSpan();
                         var ok = plugin.ProcessSendPacket(ref span);
-                        Array.Copy(buf, 0, msg.Payload.Array, 1, size);
+
+                        var resp = new PluginPacketRequest()
+                        {
+                            Cmd = req.Cmd,
+                            Packet = ok ? req.Packet : Array.Empty<byte>(),
+                        };
+
+                        using var buf = resp.PackToBuffer();
+
+                        return new ArraySegment<byte>(buf.Data, 0, buf.Size);
                     }
-                   
-                    break;
             }
 
-            return;
+            return _empty;
         }
 
         public short GetPackeLen(Guid id)

@@ -359,7 +359,7 @@ sealed class Plugin
         }
     }
 
-    public bool ProcessRecvPacket(byte[] data, ref int length)
+    public bool ProcessRecvPacket(ref byte[] data, ref int length)
     {
         var result = true;
         if (_onRecv_new != null)
@@ -429,7 +429,7 @@ sealed class Plugin
 
     public bool ProcessHotkeys(int key, int mod, bool ispressed)
     {
-        var result = _onHotkeyPressed?.Invoke(key, mod, ispressed) ?? false;
+        var result = _onHotkeyPressed?.Invoke(key, mod, ispressed) ?? true;
 
         return result;
     }
