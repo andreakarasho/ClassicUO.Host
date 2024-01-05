@@ -8,12 +8,14 @@ using ClassicUO.Host;
 using CUO_API;
 
 
-sealed class Plugin 
+sealed class Plugin
 {
     public static List<Plugin> Plugins { get; } = new List<Plugin>();
 
 
+
     private readonly ClassicUORpcServer _server;
+    private readonly Dictionary<int, short> _packetLengthCache = new Dictionary<int, short>();
 
     public Plugin(ClassicUORpcServer server, Guid clientID)
     {
@@ -249,7 +251,13 @@ sealed class Plugin
 
     short GetPacketLength(int packetId)
     {
-        return _server.GetPackeLen(ClientID);
+        if (_packetLengthCache.TryGetValue(packetId, out var len))
+            return len;
+
+        len = _server.GetPacketLen(ClientID, (byte)packetId);
+        _packetLengthCache.Add(packetId, len);
+
+        return len;
     }
 
     void CastSpell(int index)
