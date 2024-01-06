@@ -193,7 +193,7 @@ namespace ClassicUO.Host
                         var resp = new PluginPacketRequestResponse()
                         {
                             Cmd = req.Cmd,
-                            Packet = ok ? req.Packet : Array.Empty<byte>(),
+                            Packet = ok ? req.Packet : null,
                         };
 
                         using var buf = resp.PackToBuffer();
@@ -211,7 +211,7 @@ namespace ClassicUO.Host
                         var resp = new PluginPacketRequestResponse()
                         {
                             Cmd = req.Cmd,
-                            Packet = ok ? req.Packet : Array.Empty<byte>(),
+                            Packet = ok ? req.Packet : null,
                         };
 
                         using var buf = resp.PackToBuffer();
@@ -262,7 +262,7 @@ namespace ClassicUO.Host
             var bufferCopy = new byte[len];
             unsafe
             {
-                fixed (byte* pt = &bufferCopy[1])
+                fixed (byte* pt = &bufferCopy[0])
                     Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
             }
 
@@ -300,7 +300,7 @@ namespace ClassicUO.Host
             var bufferCopy = new byte[len];
             unsafe
             {
-                fixed (byte* pt = &bufferCopy[1])
+                fixed (byte* pt = &bufferCopy[0])
                     Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
             }
 
