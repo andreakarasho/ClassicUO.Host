@@ -246,7 +246,7 @@ namespace ClassicUO.Host
             };
 
             using var buf = req.PackToBuffer();
-            var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
+            using var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
 
             var resp = new PluginPacketLengthResponse();
             resp.Unpack(respMsg.Payload.Array, respMsg.Payload.Offset);
@@ -291,7 +291,7 @@ namespace ClassicUO.Host
                         Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
                 }
 
-                var respMsg = Request(id, new ArraySegment<byte>(rentBuf, 0, sizeof(byte) + sizeof(ushort) + len));
+                using var respMsg = Request(id, new ArraySegment<byte>(rentBuf, 0, sizeof(byte) + sizeof(ushort) + len));
             }
             finally
             {
