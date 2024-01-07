@@ -1,7 +1,7 @@
 ﻿using ClassicUO.Host;
 using System;
 using System.Net;
-using StructPacker;
+
 
 var address = "127.0.0.1";
 var port = 7777;

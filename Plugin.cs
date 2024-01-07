@@ -377,7 +377,14 @@ sealed class Plugin
         }
         else if (_onRecv != null)
         {
+            var tmp = data;
             result = _onRecv(ref data, ref length);
+
+            if (!ReferenceEquals(tmp, data))
+            {
+                Array.Copy(data, tmp, length);
+                data = tmp;
+            }
         }
         
         // get from cuo
@@ -385,16 +392,23 @@ sealed class Plugin
         return result;
     }
 
-    public bool ProcessSendPacket(ref byte[] buffer, ref int length)
+    public bool ProcessSendPacket(ref byte[] data, ref int length)
     {
         var result = true;
         if (_onSend_new != null)
         {
-            result = _onSend_new(buffer, ref length);
+            result = _onSend_new(data, ref length);
         }
         else if (_onSend != null)
         {
-            result = _onSend(ref buffer, ref length);
+            var tmp = data;
+            result = _onSend(ref data, ref length);
+
+            if (!ReferenceEquals(tmp, data))
+            {
+                Array.Copy(data, tmp, length);
+                data = tmp;
+            }
         }
 
         // get from cuo

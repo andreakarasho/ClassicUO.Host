@@ -185,38 +185,52 @@ namespace ClassicUO.Host
                 case PluginCuoProtocol.OnPacketIn:
                     {
                         var packetLen = (int) BinaryPrimitives.ReadUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)));
-                        var buf = new byte[packetLen];
+                        var rentBuf = ArrayPool<byte>.Shared.Rent(packetLen);
 
-                        msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)).CopyTo(buf);
-
-                        var ok = plugin.ProcessRecvPacket(ref buf, ref packetLen);
-                        
-                        if (!ok)
+                        try
                         {
-                            packetLen = 0;
-                        }
+                            msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort), packetLen).CopyTo(rentBuf);
 
-                        BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
-                        buf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
-                        return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
+                            var ok = plugin.ProcessRecvPacket(ref rentBuf, ref packetLen);
+
+                            if (!ok)
+                            {
+                                packetLen = 0;
+                            }
+
+                            BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
+                            rentBuf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
+                            return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
+                        }
+                        finally
+                        {
+                            ArrayPool<byte>.Shared.Return(rentBuf);
+                        }   
                     }            
                 case PluginCuoProtocol.OnPacketOut:
                     {
                         var packetLen = (int)BinaryPrimitives.ReadUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)));
-                        var buf = new byte[packetLen];
+                        var rentBuf = ArrayPool<byte>.Shared.Rent(packetLen);
 
-                        msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)).CopyTo(buf);
-                        
-                        var ok = plugin.ProcessSendPacket(ref buf, ref packetLen);
-
-                        if (!ok)
+                        try
                         {
-                            packetLen = 0;
-                        }
+                            msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort), packetLen).CopyTo(rentBuf);
 
-                        BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
-                        buf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
-                        return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
+                            var ok = plugin.ProcessSendPacket(ref rentBuf, ref packetLen);
+
+                            if (!ok)
+                            {
+                                packetLen = 0;
+                            }
+
+                            BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
+                            rentBuf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
+                            return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
+                        }
+                        finally
+                        {
+                            ArrayPool<byte>.Shared.Return(rentBuf);
+                        }
                     }
             }
 
