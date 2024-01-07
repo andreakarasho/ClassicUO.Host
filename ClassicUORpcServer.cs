@@ -115,21 +115,21 @@ namespace ClassicUO.Host
 
         static readonly ArraySegment<byte> _empty = new ArraySegment<byte>(Array.Empty<byte>());
 
-        protected override ArraySegment<byte> OnRequest(Guid id, RpcMessage msg)
+        protected override ArraySegment<byte> OnRequest(Guid id, ArraySegment<byte> msg)
         {
-            if (msg.Payload.Count == 0)
+            if (msg.Count == 0)
                 return _empty;
 
             if (!_plugins.TryGetValue(id, out Plugin plugin))
                 return _empty;
 
-            var cuoProtcolID = (PluginCuoProtocol)msg.Payload.Array[msg.Payload.Offset + 0];
+            var cuoProtcolID = (PluginCuoProtocol)msg.Array[msg.Offset + 0];
 
             switch (cuoProtcolID)
             {
                 case PluginCuoProtocol.OnInitialize:
                     var initReq = new PluginInitializeRequest();
-                    initReq.Unpack(msg.Payload.Array, msg.Payload.Offset);
+                    initReq.Unpack(msg.Array, msg.Offset);
 
                     plugin.Load(initReq.PluginPath, initReq.ClientVersion, initReq.AssetsPath);
                     break;
@@ -154,13 +154,13 @@ namespace ClassicUO.Host
                 case PluginCuoProtocol.OnHotkey:
                     {
                         var req = new PluginHotkeyRequest();
-                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+                        req.Unpack(msg.Array, msg.Offset);
 
                         var ok = plugin.ProcessHotkeys(req.Key, req.Mod, req.IsPressed);
 
                         var resp = new PluginHotkeyResponse()
                         {
-                            Cmd = (byte)msg.Command,
+                            Cmd = req.Cmd,
                             Allowed = ok,
                         };
 
@@ -171,7 +171,7 @@ namespace ClassicUO.Host
                 case PluginCuoProtocol.OnMouse:
                     {
                         var req = new PluginMouseRequest();
-                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+                        req.Unpack(msg.Array, msg.Offset);
 
                         plugin.ProcessMouse(req.Button, req.Wheel);
                     }
@@ -184,12 +184,12 @@ namespace ClassicUO.Host
                     break;
                 case PluginCuoProtocol.OnPacketIn:
                     {
-                        var packetLen = (int) BinaryPrimitives.ReadUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)));
+                        var packetLen = (int) BinaryPrimitives.ReadUInt16LittleEndian(msg.AsSpan(sizeof(byte), sizeof(ushort)));
                         var rentBuf = ArrayPool<byte>.Shared.Rent(packetLen);
 
                         try
                         {
-                            msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort), packetLen).CopyTo(rentBuf);
+                            msg.Array.AsSpan(sizeof(byte) + sizeof(ushort), packetLen).CopyTo(rentBuf);
 
                             var ok = plugin.ProcessRecvPacket(ref rentBuf, ref packetLen);
 
@@ -198,9 +198,9 @@ namespace ClassicUO.Host
                                 packetLen = 0;
                             }
 
-                            BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
-                            rentBuf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
-                            return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
+                            BinaryPrimitives.WriteUInt16LittleEndian(msg.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
+                            rentBuf.AsSpan(0, packetLen).CopyTo(msg.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
+                            return new ArraySegment<byte>(msg.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
                         }
                         finally
                         {
@@ -209,12 +209,12 @@ namespace ClassicUO.Host
                     }            
                 case PluginCuoProtocol.OnPacketOut:
                     {
-                        var packetLen = (int)BinaryPrimitives.ReadUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)));
+                        var packetLen = (int)BinaryPrimitives.ReadUInt16LittleEndian(msg.AsSpan(sizeof(byte), sizeof(ushort)));
                         var rentBuf = ArrayPool<byte>.Shared.Rent(packetLen);
 
                         try
                         {
-                            msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort), packetLen).CopyTo(rentBuf);
+                            msg.Array.AsSpan(sizeof(byte) + sizeof(ushort), packetLen).CopyTo(rentBuf);
 
                             var ok = plugin.ProcessSendPacket(ref rentBuf, ref packetLen);
 
@@ -223,9 +223,9 @@ namespace ClassicUO.Host
                                 packetLen = 0;
                             }
 
-                            BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
-                            rentBuf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
-                            return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
+                            BinaryPrimitives.WriteUInt16LittleEndian(msg.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
+                            rentBuf.AsSpan(0, packetLen).CopyTo(msg.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
+                            return new ArraySegment<byte>(msg.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
                         }
                         finally
                         {
@@ -246,10 +246,15 @@ namespace ClassicUO.Host
             };
 
             using var buf = req.PackToBuffer();
-            using var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
+            var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
 
             var resp = new PluginPacketLengthResponse();
-            resp.Unpack(respMsg.Payload.Array, respMsg.Payload.Offset);
+            resp.Unpack(respMsg.Array, respMsg.Offset);
+
+            if (respMsg.Array != null &&  respMsg.Array.Length > 0)
+            {
+                ArrayPool<byte>.Shared.Return(respMsg.Array);
+            }
 
             return resp.PacketLength;
         }
@@ -291,7 +296,12 @@ namespace ClassicUO.Host
                         Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
                 }
 
-                using var respMsg = Request(id, new ArraySegment<byte>(rentBuf, 0, sizeof(byte) + sizeof(ushort) + len));
+                var respMsg = Request(id, new ArraySegment<byte>(rentBuf, 0, sizeof(byte) + sizeof(ushort) + len));
+
+                if (respMsg.Array != null && respMsg.Array.Length > 0)
+                {
+                    ArrayPool<byte>.Shared.Return(respMsg.Array);
+                }
             }
             finally
             {
