@@ -76,12 +76,12 @@ namespace ClassicUO.Host
             public byte Cmd;
         }
 
-        [Pack]
-        internal struct PluginPacketRequestResponse
-        {
-            public byte Cmd;
-            public byte[] Packet;
-        }
+        //[Pack]
+        //internal struct PluginPacketRequestResponse
+        //{
+        //    public byte Cmd;
+        //    public byte[] Packet;
+        //}
 
         [Pack]
         internal struct PluginPacketLengthRequest
@@ -184,39 +184,39 @@ namespace ClassicUO.Host
                     break;
                 case PluginCuoProtocol.OnPacketIn:
                     {
-                        var req = new PluginPacketRequestResponse();
-                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+                        var packetLen = (int) BinaryPrimitives.ReadUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)));
+                        var buf = new byte[packetLen];
 
-                        var packetLen = req.Packet.Length;
-                        var ok = plugin.ProcessRecvPacket(ref req.Packet, ref packetLen);
+                        msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)).CopyTo(buf);
 
-                        var resp = new PluginPacketRequestResponse()
+                        var ok = plugin.ProcessRecvPacket(ref buf, ref packetLen);
+                        
+                        if (!ok)
                         {
-                            Cmd = req.Cmd,
-                            Packet = ok ? req.Packet : null,
-                        };
+                            packetLen = 0;
+                        }
 
-                        using var buf = resp.PackToBuffer();
-
-                        return new ArraySegment<byte>(buf.Data, 0, buf.Size);
+                        BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
+                        buf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
+                        return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
                     }            
                 case PluginCuoProtocol.OnPacketOut:
                     {
-                        var req = new PluginPacketRequestResponse();
-                        req.Unpack(msg.Payload.Array, msg.Payload.Offset);
+                        var packetLen = (int)BinaryPrimitives.ReadUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)));
+                        var buf = new byte[packetLen];
 
-                        var span = req.Packet.AsSpan();
-                        var ok = plugin.ProcessSendPacket(ref span);
+                        msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)).CopyTo(buf);
+                        
+                        var ok = plugin.ProcessSendPacket(ref buf, ref packetLen);
 
-                        var resp = new PluginPacketRequestResponse()
+                        if (!ok)
                         {
-                            Cmd = req.Cmd,
-                            Packet = ok ? req.Packet : null,
-                        };
+                            packetLen = 0;
+                        }
 
-                        using var buf = resp.PackToBuffer();
-
-                        return new ArraySegment<byte>(buf.Data, 0, buf.Size);
+                        BinaryPrimitives.WriteUInt16LittleEndian(msg.Payload.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)packetLen);
+                        buf.AsSpan(0, packetLen).CopyTo(msg.Payload.Array.AsSpan(sizeof(byte) + sizeof(ushort)));
+                        return new ArraySegment<byte>(msg.Payload.Array, 0, sizeof(byte) + sizeof(ushort) + packetLen);
                     }
             }
 
@@ -240,78 +240,49 @@ namespace ClassicUO.Host
             return resp.PacketLength;
         }
 
-        public bool OnPluginRecv(Guid id, byte[] buffer, int len)
+        public unsafe bool OnPluginRecv(Guid id, byte[] buffer, int len)
         {
-            var bufferCopy = new byte[len];
-            buffer.AsSpan(0, len).CopyTo(bufferCopy);
-
-            var req = new PluginPacketRequestResponse()
-            {
-                Cmd = (byte)PluginCuoProtocol.OnPluginRecv,
-                Packet = bufferCopy
-            };
-
-            using var buf = req.PackToBuffer();
-            var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
-
-            return true;
+            fixed (byte* ptr = buffer)
+                return OnPluginRecv(id, (IntPtr)ptr, len);
         }
 
         public bool OnPluginRecv(Guid id, IntPtr buffer, int len)
         {
-            var bufferCopy = new byte[len];
-            unsafe
-            {
-                fixed (byte* pt = &bufferCopy[0])
-                    Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
-            }
-
-            var req = new PluginPacketRequestResponse()
-            {
-                Cmd = (byte)PluginCuoProtocol.OnPluginRecv,
-                Packet = bufferCopy
-            };
-
-            using var buf = req.PackToBuffer();
-            var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
-
-            return true;
+            return OnPluginSendRecv(id, buffer, len, PluginCuoProtocol.OnPluginRecv);
         }
 
-        public bool OnPluginSend(Guid id, byte[] buffer, int len)
+        public unsafe bool OnPluginSend(Guid id, byte[] buffer, int len)
         {
-            var bufferCopy = new byte[len];
-            buffer.AsSpan(0, len).CopyTo(bufferCopy);
-
-            var req = new PluginPacketRequestResponse()
-            {
-                Cmd = (byte)PluginCuoProtocol.OnPluginSend,
-                Packet = bufferCopy
-            };
-
-            using var buf = req.PackToBuffer();
-            var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
-
-            return true;
+            fixed (byte* ptr = buffer)
+                return OnPluginSend(id, (IntPtr)ptr, len);
         }
 
         public bool OnPluginSend(Guid id, IntPtr buffer, int len)
         {
-            var bufferCopy = new byte[len];
-            unsafe
+            return OnPluginSendRecv(id, buffer, len, PluginCuoProtocol.OnPluginSend);
+        }
+
+        private bool OnPluginSendRecv(Guid id, IntPtr buffer, int len, PluginCuoProtocol protocol)
+        {
+            var rentBuf = ArrayPool<byte>.Shared.Rent(sizeof(byte) + sizeof(ushort) + len);
+
+            try
             {
-                fixed (byte* pt = &bufferCopy[0])
-                    Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
+                rentBuf[0] = (byte)protocol;
+                BinaryPrimitives.WriteUInt16LittleEndian(rentBuf.AsSpan(sizeof(byte), sizeof(ushort)), (ushort)len);
+
+                unsafe
+                {
+                    fixed (byte* pt = &rentBuf[sizeof(byte) + sizeof(ushort)])
+                        Buffer.MemoryCopy(buffer.ToPointer(), pt, sizeof(byte) * len, sizeof(byte) * len);
+                }
+
+                var respMsg = Request(id, new ArraySegment<byte>(rentBuf, 0, sizeof(byte) + sizeof(ushort) + len));
             }
-
-            var req = new PluginPacketRequestResponse()
+            finally
             {
-                Cmd = (byte)PluginCuoProtocol.OnPluginSend,
-                Packet = bufferCopy
-            };
-
-            using var buf = req.PackToBuffer();
-            var respMsg = Request(id, new ArraySegment<byte>(buf.Data, 0, buf.Size));
+                ArrayPool<byte>.Shared.Return(rentBuf);
+            }
 
             return true;
         }

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Remoting.Messaging;
 using ClassicUO.Host;
 using CUO_API;
 
@@ -384,24 +385,16 @@ sealed class Plugin
         return result;
     }
 
-    public bool ProcessSendPacket(ref Span<byte> message)
+    public bool ProcessSendPacket(ref byte[] buffer, ref int length)
     {
         var result = true;
         if (_onSend_new != null)
         {
-            var tmp = message.ToArray();
-            var length = tmp.Length;
-            result = _onSend_new(tmp, ref length);
-            message = message.Slice(0, length);
-            tmp.AsSpan(0, length).CopyTo(message);
+            result = _onSend_new(buffer, ref length);
         }
         else if (_onSend != null)
         {
-            var tmp = message.ToArray();
-            var length = tmp.Length;
-            result = _onSend(ref tmp, ref length);
-            message = message.Slice(0, length);
-            tmp.AsSpan(0, length).CopyTo(message);
+            result = _onSend(ref buffer, ref length);
         }
 
         // get from cuo
@@ -446,7 +439,6 @@ sealed class Plugin
     {
         _onMouse?.Invoke(button, wheel);
     }
-
 
     public unsafe int ProcessWndProc(void* e)
     {
