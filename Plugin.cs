@@ -263,7 +263,7 @@ sealed class Plugin
 
     void CastSpell(int index)
     {
-        // get from cuo
+        _server.OnCastSpell(ClientID, index);
     }
 
     bool OnPluginRecv(ref byte[] data, ref int length)
@@ -295,6 +295,7 @@ sealed class Plugin
     void SetWindowTitle(string str)
     {
         // get from cuo
+        _server.OnSetWindowTitle(ClientID, str);
     }
 
     bool GetStaticData(
@@ -328,11 +329,9 @@ sealed class Plugin
 
     bool GetCliloc(int cliloc, string args, bool capitalize, out string buffer)
     {
-        // get from cuo
+        buffer = _server.OnGetCliloc(ClientID, cliloc, args, capitalize);
 
-        buffer = "";
-
-        return buffer != null;
+        return !string.IsNullOrEmpty(buffer);
     }
 
     void GetStaticImage(ushort g, ref CUO_API.ArtInfo info)
@@ -342,18 +341,12 @@ sealed class Plugin
 
     bool RequestMove(int dir, bool run)
     {
-        // get from cuo
-
-        return true;
+        return _server.OnRequestMove(ClientID, dir, run);
     }
 
     bool GetPlayerPosition(out int x, out int y, out int z)
     {
-        // get from cuo
-
-        x = y = z = 0;
-
-        return false;
+        return _server.OnGetPlayerPosition(ClientID, out x, out y, out z);
     }
 
     public void Tick()
@@ -380,7 +373,8 @@ sealed class Plugin
             var tmp = data;
             result = _onRecv(ref data, ref length);
 
-            if (!ReferenceEquals(tmp, data))
+            //if (!ReferenceEquals(tmp, data))
+            if (!tmp.Equals(data))
             {
                 Array.Copy(data, tmp, length);
                 data = tmp;
@@ -404,7 +398,7 @@ sealed class Plugin
             var tmp = data;
             result = _onSend(ref data, ref length);
 
-            if (!ReferenceEquals(tmp, data))
+            if (!tmp.Equals(data))
             {
                 Array.Copy(data, tmp, length);
                 data = tmp;
