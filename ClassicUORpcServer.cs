@@ -1,14 +1,9 @@
-﻿using CUO_API;
-using StructPacker;
+﻿using StructPacker;
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Drawing;
-using System.Security.Policy;
-using System.Text;
-using System.Threading.Tasks;
+
 
 namespace ClassicUO.Host
 {
